@@ -12,7 +12,7 @@
 
 require_once __DIR__ . '/../vendor/autoload.php';
 
-use Nermif\PhpRedisStock\RedisStock;
+use Nermif\RedisStock;
 
 echo "========================================\n";
 echo "    秒杀场景演示\n";
@@ -39,9 +39,15 @@ $seckillProducts = [
 ];
 
 $created = $stockManager->initStocks($seckillProducts, 7200); // 2小时过期
-echo "✓ 成功预热 {$created} 个商品\n";
+echo "✓ 库存预热完成\n";
+if ($created > 0) {
+    echo "  新创建 {$created} 个商品库存\n";
+} else {
+    echo "  注意：所有商品库存已存在，跳过初始化（幂等保护）\n";
+}
+echo "  预热商品列表：\n";
 foreach ($seckillProducts as $sku => $stock) {
-    echo "  - {$sku}: {$stock} 件\n";
+    echo "    - {$sku}: {$stock} 件\n";
 }
 echo "\n";
 

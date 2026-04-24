@@ -8,7 +8,7 @@
 
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Redis;
-use Nermif\PhpRedisStock\RedisStock;
+use Nermif\RedisStock;
 
 class StockService
 {

@@ -8,7 +8,7 @@
 
 use think\facade\Log;
 use think\facade\Cache;
-use Nermif\PhpRedisStock\RedisStock;
+use Nermif\RedisStock;
 
 class StockService
 {

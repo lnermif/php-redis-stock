@@ -6,7 +6,7 @@
 
 require_once __DIR__ . '/../vendor/autoload.php';
 
-use Nermif\PhpRedisStock\RedisStock;
+use Nermif\RedisStock;
 
 // 1. 创建 Redis 连接
 $redis = new Redis();
@@ -24,7 +24,12 @@ $stocks = [
     'SKU003' => 200,
 ];
 $created = $stockManager->initStocks($stocks, 3600); // TTL 1小时
-echo "成功初始化 {$created} 个商品库存\n\n";
+if ($created > 0) {
+    echo "成功新创建 {$created} 个商品库存\n";
+} else {
+    echo "商品库存已存在，跳过初始化（幂等保护）\n";
+}
+echo "\n";
 
 // 4. 查询库存
 echo "=== 查询库存 ===\n";

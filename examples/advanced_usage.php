@@ -10,7 +10,7 @@
 
 require_once __DIR__ . '/../vendor/autoload.php';
 
-use Nermif\PhpRedisStock\RedisStock;
+use Nermif\RedisStock;
 
 // ========== 1. 自定义日志器 ==========
 echo "=== 自定义日志器 ===\n";
