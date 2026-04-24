@@ -31,7 +31,7 @@ class RedisStock
 
     /**
      * @var string 售罄标记前缀
-     * lua script 也有此参数
+     * 此后缀会通过字符替换到 Lua 脚本中
      */
     private const SOLD_OUT_SUFFIX = ':soldout';
 
@@ -215,6 +215,8 @@ LUA,
      * @param Redis $redis Redis 连接实例（需已 connect）
      * @param string $keyPrefix Key 前缀，建议使用 Hash Tag，如 '{product:stock}:'
      * @param LoggerInterface|null $logger PSR-3 日志实例
+     *
+     * 注意：如果业务涉及 decrMultiStocks（批量扣减），所有参与扣减的 SKU 必须共享相同的 Hash Tag（例如 {order}:），否则 Redis 集群会抛出 CROSSSLOT 错误
      */
     public function __construct(Redis $redis, string $keyPrefix = '{product:stock}:', ?LoggerInterface $logger = null)
     {
@@ -275,7 +277,7 @@ LUA,
     {
         $msg = $e->getMessage();
 
-        // READONLY：集群 slave 只读，刷新槽位后可重试
+        // READONLY：集群节点角色切换（主从切换）导致的只读错误
         if (strpos($msg, 'READONLY') !== false) {
             try {
                 $this->redis->reset();
@@ -372,7 +374,7 @@ LUA,
      *
      * @param array $stocks 关联数组 ['sku' => 库存数量]
      * @param int $ttl 过期时间（秒），0 表示永不过期
-     * @return int 新创建的 Key 数量
+     * @return int 成功初始化（此前不存在）的 SKU 数量
      */
     public function initStocks(array $stocks, int $ttl = 0): int
     {
@@ -578,8 +580,8 @@ LUA,
     }
 
     /**
-     * 批量扣减库存（多规格订单，事务性原子操作）
-     *
+     * 批量扣减库存
+     * 原子性保证：利用 Lua 脚本实现伪事务（要么全部成功，要么全部失败）
      * @param array $items 关联数组 ['sku' => 数量]
      * @return array 成功：['success'=>true, 'code'=>CODE_SUCCESS, 'remain'=>[...]]
      *               失败：['success'=>false, 'code'=>错误码, 'sku'=>失败规格, 'required'=>需求量, 'available'=>可用量]
@@ -711,6 +713,9 @@ LUA,
 
     /**
      * 原子修复不一致的状态
+     * 此方法是幂等的，可由监控脚本或异步任务重复调用。
+     * 修复场景包括：孤立标记清除、缺失标记补全、库存与标记状态同步。
+     *
      * @param string $sku
      * @return array [success => bool, action => string]
      */
