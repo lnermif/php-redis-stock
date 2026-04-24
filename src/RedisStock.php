@@ -370,6 +370,29 @@ LUA,
     }
 
     /**
+     * 获取主库存 Key
+     *
+     * @param string $sku SKU
+     * @return string
+     */
+    private function getStockKey(string $sku): string
+    {
+        return $this->keyPrefix . $sku;
+    }
+
+    /**
+     * 获取售罄标记 Key
+     *
+     * @param string $sku
+     * @return string
+     */
+    private function getSoldOutKey(string $sku): string
+    {
+        // 这里也可以直接调用 getStockKey 再拼接，减少 prefix 的访问
+        return $this->getStockKey($sku) . self::SOLD_OUT_SUFFIX;
+    }
+
+    /**
      * 初始化库存（支持 TTL）
      *
      * @param array $stocks 关联数组 ['sku' => 库存数量]
@@ -483,7 +506,7 @@ LUA,
      */
     public function isSoldOut(string $sku): bool
     {
-        return (bool)$this->redis->exists($this->keyPrefix . $sku . self::SOLD_OUT_SUFFIX);
+        return (bool)$this->redis->exists($this->getSoldOutKey($sku));
     }
 
     /**
@@ -506,10 +529,7 @@ LUA,
             ];
         }
 
-        $keys = [
-            $this->keyPrefix . $sku,
-            $this->keyPrefix . $sku . self::SOLD_OUT_SUFFIX
-        ];
+        $keys = [$this->getStockKey($sku), $this->getSoldOutKey($sku)];
         $args = [
             $quantity,
             self::CODE_ERR_NOT_EXISTS,
@@ -553,10 +573,7 @@ LUA,
             ];
         }
 
-        $keys = [
-            $this->keyPrefix . $sku,
-            $this->keyPrefix . $sku . self::SOLD_OUT_SUFFIX
-        ];
+        $keys = [$this->getStockKey($sku), $this->getSoldOutKey($sku)];
         $args = [
             $quantity,
             self::CODE_ERR_NOT_EXISTS
@@ -596,7 +613,7 @@ LUA,
         $keys = [];
         $args = [];
         foreach ($skuList as $sku) {
-            $keys[] = $this->keyPrefix . $sku;
+            $keys[] = $this->getStockKey($sku);
             $args[] = max(0, (int)$items[$sku]);
         }
 
@@ -648,10 +665,7 @@ LUA,
      */
     public function delStock(string $sku): int
     {
-        $keys = [
-            $this->keyPrefix . $sku,
-            $this->keyPrefix . $sku . self::SOLD_OUT_SUFFIX
-        ];
+        $keys = [$this->getStockKey($sku), $this->getSoldOutKey($sku)];
         $deleted = $this->redis->del($keys);
         $this->log(LogLevel::INFO, 'Stock deleted', ['sku' => $sku, 'deleted' => $deleted]);
         return $deleted;
@@ -664,8 +678,8 @@ LUA,
      */
     public function monitor(string $sku): array
     {
-        $stockKey = $this->keyPrefix . $sku;
-        $soldOutKey = $stockKey . self::SOLD_OUT_SUFFIX;
+        $stockKey = $this->getStockKey($sku);
+        $soldOutKey = $this->getSoldOutKey($sku);
 
         try {
             $pipe = $this->redis->multi(Redis::PIPELINE);
@@ -721,10 +735,7 @@ LUA,
      */
     public function repair(string $sku): array
     {
-        $keys = [
-            $this->keyPrefix . $sku,
-            $this->keyPrefix . $sku . self::SOLD_OUT_SUFFIX
-        ];
+        $keys = [$this->getStockKey($sku), $this->getSoldOutKey($sku)];
 
         try {
             $res = (int)$this->execLuaWithRetry('repair', $keys, [], $this->maxRetries);
