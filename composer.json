@@ -1,0 +1,26 @@
+{
+    "name": "nermif/php-redis-stock",
+    "description": "A PHP Redis Stock",
+    "keywords": [
+        "php",
+        "redis",
+        "stock"
+    ],
+    "license": "MIT",
+    "autoload": {
+        "psr-4": {
+            "Nermif\\PhpRedisStock\\": "src/"
+        }
+    },
+    "authors": [
+        {
+            "name": "Nermif",
+            "email": "cxal@outlook.com"
+        }
+    ],
+    "require": {
+        "php": ">=7.2.0",
+        "ext-redis": "*",
+        "psr/log": "^2.0|^3.0"
+    }
+}
