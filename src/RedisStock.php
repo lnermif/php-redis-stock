@@ -1,5 +1,7 @@
 <?php
 
+namespace Nermif;
+
 use Psr\Log\LoggerInterface;
 use Psr\Log\LogLevel;
 use Psr\Log\NullLogger;
@@ -36,7 +38,7 @@ class RedisStock
     private const SOLD_OUT_SUFFIX = ':soldout';
 
     /**
-     * @var Redis
+     * @var \Redis
      */
     private $redis;
 
@@ -212,13 +214,13 @@ LUA,
     /**
      * 构造函数
      *
-     * @param Redis $redis Redis 连接实例（需已 connect）
+     * @param \Redis $redis Redis 连接实例（需已 connect）
      * @param string $keyPrefix Key 前缀，建议使用 Hash Tag，如 '{product:stock}:'
      * @param LoggerInterface|null $logger PSR-3 日志实例
      *
      * 注意：如果业务涉及 decrMultiStocks（批量扣减），所有参与扣减的 SKU 必须共享相同的 Hash Tag（例如 {order}:），否则 Redis 集群会抛出 CROSSSLOT 错误
      */
-    public function __construct(Redis $redis, string $keyPrefix = '{product:stock}:', ?LoggerInterface $logger = null)
+    public function __construct(\Redis $redis, string $keyPrefix = '{product:stock}:', ?LoggerInterface $logger = null)
     {
         $this->redis = $redis;
         $this->keyPrefix = $keyPrefix;
@@ -244,7 +246,7 @@ LUA,
             try {
                 $realScript = $this->getOriginalScriptString($name);
                 $this->scriptShas[$name] = $this->redis->script('load', $realScript);
-            } catch (RedisException $e) {
+            } catch (\RedisException $e) {
                 $this->scriptShas[$name] = null;
                 $this->log(LogLevel::WARNING, "Lua script {$name} load failed, fallback to EVAL", [
                     'error' => $e->getMessage(),
@@ -262,7 +264,7 @@ LUA,
     private function getOriginalScriptString(string $name): string
     {
         if (!isset(self::LUA_SCRIPTS[$name])) {
-            throw new RuntimeException("Undefined Lua script: {$name}");
+            throw new \RuntimeException("Undefined Lua script: {$name}");
         }
         $script = self::LUA_SCRIPTS[$name];
         return str_replace('{{SOLD_OUT_SUFFIX}}', self::SOLD_OUT_SUFFIX, $script);
@@ -270,10 +272,10 @@ LUA,
 
     /**
      * 判断是否为可重试的瞬态 Redis 错误
-     * @param RedisException $e
+     * @param \RedisException $e
      * @return bool
      */
-    private function isTransientError(RedisException $e): bool
+    private function isTransientError(\RedisException $e): bool
     {
         $msg = $e->getMessage();
 
@@ -281,7 +283,7 @@ LUA,
         if (strpos($msg, 'READONLY') !== false) {
             try {
                 $this->redis->reset();
-            } catch (Throwable $ignored) {
+            } catch (\Throwable $ignored) {
                 $this->log(LogLevel::DEBUG, 'Redis reset failed', ['exception' => $e]);
             }
             return true;
@@ -313,7 +315,7 @@ LUA,
         if ($sha) {
             try {
                 return $this->redis->evalSha($sha, $allArgs, $numKeys);
-            } catch (RedisException $e) {
+            } catch (\RedisException $e) {
                 // 如果报错 NOSCRIPT，继续往下走 EVAL 降级
                 if (strpos($e->getMessage(), 'NOSCRIPT') === false) {
                     throw $e;
@@ -343,7 +345,7 @@ LUA,
         while ($attempt <= $maxRetries) {
             try {
                 return $this->execLua($scriptName, $keys, $args);
-            } catch (RedisException $e) {
+            } catch (\RedisException $e) {
                 $lastException = $e;
                 if (!$this->isTransientError($e)) {
                     break;
@@ -366,7 +368,7 @@ LUA,
             'error' => $lastException ? $lastException->getMessage() : 'unknown',
             'exception' => $lastException
         ]);
-        throw new RuntimeException('服务繁忙，请稍后重试', self::CODE_ERR_REDIS_UNAVAILABLE, $lastException);
+        throw new \RuntimeException('服务繁忙，请稍后重试', self::CODE_ERR_REDIS_UNAVAILABLE, $lastException);
     }
 
     /**
@@ -394,6 +396,7 @@ LUA,
 
     /**
      * 初始化库存（支持 TTL）
+     * 防止重复并发覆盖、幂等性保护
      *
      * @param array $stocks 关联数组 ['sku' => 库存数量]
      * @param int $ttl 过期时间（秒），0 表示永不过期
@@ -437,19 +440,19 @@ LUA,
 
         while ($attempt <= $this->maxRetries) {
             try {
-                $pipe = $this->redis->multi(Redis::PIPELINE);
+                $pipe = $this->redis->multi(\Redis::PIPELINE);
                 $pipe->get($stockKey);
                 $pipe->exists($soldOutKey);
                 $results = $pipe->exec();
 
                 if ($results === false) {
-                    throw new RedisException('Pipeline exec returned false');
+                    throw new \RedisException('Pipeline exec returned false');
                 }
 
                 $stock = ($results[0] === false) ? null : (int)$results[0];
                 $soldOut = (bool)($results[1] ?? 0);
                 return ['stock' => $stock, 'soldOut' => $soldOut];
-            } catch (RedisException $e) {
+            } catch (\RedisException $e) {
                 $lastException = $e;
                 if (!$this->isTransientError($e)) {
                     break;
@@ -473,7 +476,7 @@ LUA,
             'error' => $lastException->getMessage(),
             'exception' => $lastException
         ]);
-        throw new RuntimeException('获取库存失败', self::CODE_ERR_REDIS_UNAVAILABLE, $lastException);
+        throw new \RuntimeException('获取库存失败', self::CODE_ERR_REDIS_UNAVAILABLE, $lastException);
     }
 
     /**
@@ -682,14 +685,14 @@ LUA,
         $soldOutKey = $this->getSoldOutKey($sku);
 
         try {
-            $pipe = $this->redis->multi(Redis::PIPELINE);
+            $pipe = $this->redis->multi(\Redis::PIPELINE);
             $pipe->get($stockKey);
             $pipe->ttl($stockKey);
             $pipe->exists($soldOutKey);
             $res = $pipe->exec();
 
             if ($res === false) {
-                throw new RedisException('Pipeline exec failed');
+                throw new \RedisException('Pipeline exec failed');
             }
 
             $stockValue = $res[0];
@@ -719,7 +722,7 @@ LUA,
                 'is_sold_out' => $hasSoldOut,
                 'consistency' => $consistency,
             ];
-        } catch (RedisException $e) {
+        } catch (\RedisException $e) {
             $this->log(LogLevel::ERROR, "Monitor failed", ['sku' => $sku, 'exception' => $e]);
             throw $e;
         }
@@ -758,7 +761,7 @@ LUA,
                 'action' => $actionText,
                 'code' => $res
             ];
-        } catch (Exception $e) {
+        } catch (\Exception $e) {
             $this->log(LogLevel::ERROR, "Repair failed", ['sku' => $sku, 'exception' => $e]);
             return ['success' => false, 'error' => $e->getMessage()];
         }
