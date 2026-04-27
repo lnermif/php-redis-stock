@@ -20,57 +20,17 @@ use Psr\Log\NullLogger;
  *   - 所有写操作均通过 Redis Lua 脚本原子执行
  *   - 使用 Hash Tag（如 {seckill:stock}:）确保集群模式下 Key 落在同一 Slot
  */
-class RedisStock
+class RedisStock extends AbstractRedisManager
 {
     // -------------------------------------------------------------------------
     // 返回码常量（业务层可根据这些常量判断操作结果）
     // -------------------------------------------------------------------------
-    public const CODE_SUCCESS = 1;
-    public const CODE_ERR_INSUFFICIENT = -1;   // 库存不足
-    public const CODE_ERR_NOT_EXISTS = -2;   // 库存未初始化
-    public const CODE_ERR_INVALID_QUANTITY = -3;   // 数量非法（≤0）
-    public const CODE_ERR_REDIS_UNAVAILABLE = -4;  // Redis 不可用
+    public const CODE_SUCCESS = RedisConstants::CODE_SUCCESS;
+    public const CODE_ERR_INSUFFICIENT = RedisConstants::CODE_ERR_INSUFFICIENT;   // 库存不足
+    public const CODE_ERR_NOT_EXISTS = RedisConstants::CODE_ERR_NOT_EXISTS;   // 库存未初始化
+    public const CODE_ERR_INVALID_QUANTITY = RedisConstants::CODE_ERR_INVALID_QUANTITY;   // 数量非法（≤0）
+    public const CODE_ERR_REDIS_UNAVAILABLE = RedisConstants::CODE_ERR_REDIS_UNAVAILABLE;  // Redis 不可用
 
-    /**
-     * @var string 售罄标记前缀
-     * 此后缀会通过字符替换到 Lua 脚本中
-     */
-    private const SOLD_OUT_SUFFIX = ':soldout';
-
-    /**
-     * @var \Redis
-     */
-    private $redis;
-
-    /**
-     * Key 前缀
-     * @var string
-     */
-    private $keyPrefix;
-
-    /**
-     * Lua 脚本 SHA1 值缓存
-     * @var array
-     */
-    private $scriptShas = [];
-
-    /**
-     * 日志回调
-     * @var LoggerInterface  function(string $level, string $message, array $context)
-     * */
-    private $logger;
-
-    /**
-     * 错误最大重试次数
-     * @var int
-     */
-    private $maxRetries = 2;
-
-    /**
-     * 重试基础延迟微秒数
-     * @var int
-     */
-    private const RETRY_BASE_DELAY_MICROSECONDS = 10000;  // 10ms
 
     /**
      * 定义 Lua 脚本模板
@@ -220,155 +180,28 @@ LUA,
      *
      * 注意：如果业务涉及 decrMultiStocks（批量扣减），所有参与扣减的 SKU 必须共享相同的 Hash Tag（例如 {order}:），否则 Redis 集群会抛出 CROSSSLOT 错误
      */
-    public function __construct(\Redis $redis, string $keyPrefix = '{product:stock}:', ?LoggerInterface $logger = null)
+    public function __construct(
+        \Redis           $redis,
+        string           $keyPrefix = '{product:stock}:',
+        ?LoggerInterface $logger = null,
+        ?int             $maxRetries = null
+    )
     {
-        $this->redis = $redis;
-        $this->keyPrefix = $keyPrefix;
-        $this->logger = $logger ?: new NullLogger();
-        $this->loadScripts();
+        parent::__construct($redis, $keyPrefix, $logger, $maxRetries);
     }
 
-    /**
-     * 记录日志
-     */
-    private function log(string $level, string $message, array $context = []): void
+    protected function getLuaScripts(): array
     {
-        $this->logger->{$level}($message, $context);
+        return self::LUA_SCRIPTS;
     }
 
-    /**
-     * 预加载 Lua 脚本到 Redis，缓存 SHA
-     * @return void
-     */
-    private function loadScripts(): void
+    protected function prepareScript(string $scriptName, string $script): string
     {
-        foreach (self::LUA_SCRIPTS as $name => $script) {
-            try {
-                $realScript = $this->getOriginalScriptString($name);
-                $this->scriptShas[$name] = $this->redis->script('load', $realScript);
-            } catch (\RedisException $e) {
-                $this->scriptShas[$name] = null;
-                $this->log(LogLevel::WARNING, "Lua script {$name} load failed, fallback to EVAL", [
-                    'error' => $e->getMessage(),
-                    'exception' => $e
-                ]);
-            }
-        }
-    }
-
-    /**
-     * 获取原始脚本字符串
-     * @param string $name
-     * @return string
-     */
-    private function getOriginalScriptString(string $name): string
-    {
-        if (!isset(self::LUA_SCRIPTS[$name])) {
-            throw new \RuntimeException("Undefined Lua script: {$name}");
-        }
-        $script = self::LUA_SCRIPTS[$name];
-        return str_replace('{{SOLD_OUT_SUFFIX}}', self::SOLD_OUT_SUFFIX, $script);
-    }
-
-    /**
-     * 判断是否为可重试的瞬态 Redis 错误
-     * @param \RedisException $e
-     * @return bool
-     */
-    private function isTransientError(\RedisException $e): bool
-    {
-        $msg = $e->getMessage();
-
-        // READONLY：集群节点角色切换（主从切换）导致的只读错误
-        if (strpos($msg, 'READONLY') !== false) {
-            try {
-                $this->redis->reset();
-            } catch (\Throwable $ignored) {
-                $this->log(LogLevel::DEBUG, 'Redis reset failed', ['exception' => $e]);
-            }
-            return true;
-        }
-
-        // 连接类错误
-        return (
-            strpos($msg, 'Connection refused') !== false ||
-            strpos($msg, 'Connection timed out') !== false ||
-            strpos($msg, 'read error on connection') !== false ||
-            strpos($msg, 'Redis is loading') !== false
+        return str_replace(
+            RedisConstants::LUA_PLACEHOLDER_SOLD_OUT_SUFFIX,
+            RedisConstants::SOLD_OUT_SUFFIX,
+            $script
         );
-    }
-
-    /**
-     * 执行 Lua 脚本（优先使用 EVALSHA，失败降级为 EVAL）
-     *
-     * @param string $scriptName 脚本名称
-     * @param array $keys Key 数组
-     * @param array $args 参数数组
-     * @return mixed
-     */
-    private function execLua(string $scriptName, array $keys, array $args)
-    {
-        $numKeys = count($keys);
-        $allArgs = array_merge($keys, $args);
-
-        $sha = $this->scriptShas[$scriptName] ?? null;
-        if ($sha) {
-            try {
-                return $this->redis->evalSha($sha, $allArgs, $numKeys);
-            } catch (\RedisException $e) {
-                // 如果报错 NOSCRIPT，继续往下走 EVAL 降级
-                if (strpos($e->getMessage(), 'NOSCRIPT') === false) {
-                    throw $e;
-                }
-            }
-        }
-
-        // 动态获取原始脚本，杜绝版本不一致
-        $originalScript = $this->getOriginalScriptString($scriptName);
-        return $this->redis->eval($originalScript, $allArgs, $numKeys);
-    }
-
-    /**
-     * 带重试机制的 Lua 执行器（指数退避）
-     *
-     * @param string $scriptName 脚本名称
-     * @param array $keys Key 数组
-     * @param array $args 参数数组
-     * @param int $maxRetries 最大重试次数
-     * @return mixed
-     */
-    private function execLuaWithRetry(string $scriptName, array $keys, array $args, int $maxRetries)
-    {
-        $attempt = 0;
-        $lastException = null;
-
-        while ($attempt <= $maxRetries) {
-            try {
-                return $this->execLua($scriptName, $keys, $args);
-            } catch (\RedisException $e) {
-                $lastException = $e;
-                if (!$this->isTransientError($e)) {
-                    break;
-                }
-                $attempt++;
-                if ($attempt <= $maxRetries) {
-                    $sleepMicro = (int)pow(2, $attempt - 1) * self::RETRY_BASE_DELAY_MICROSECONDS;
-                    usleep($sleepMicro);
-                    $this->log(LogLevel::WARNING, "Redis transient error for {$scriptName}, retrying", [
-                        'attempt' => $attempt,
-                        'sleep_ms' => $sleepMicro / 1000,
-                        'error' => $e->getMessage(),
-                        'exception' => $e
-                    ]);
-                }
-            }
-        }
-
-        $this->log(LogLevel::ERROR, "Redis operation {$scriptName} failed after retries", [
-            'error' => $lastException ? $lastException->getMessage() : 'unknown',
-            'exception' => $lastException
-        ]);
-        throw new \RuntimeException('服务繁忙，请稍后重试', self::CODE_ERR_REDIS_UNAVAILABLE, $lastException);
     }
 
     /**
@@ -391,7 +224,7 @@ LUA,
     private function getSoldOutKey(string $sku): string
     {
         // 这里也可以直接调用 getStockKey 再拼接，减少 prefix 的访问
-        return $this->getStockKey($sku) . self::SOLD_OUT_SUFFIX;
+        return $this->getStockKey($sku) . RedisConstants::SOLD_OUT_SUFFIX;
     }
 
     /**
@@ -411,12 +244,15 @@ LUA,
         $keys = [];
         $args = [];
         foreach ($stocks as $sku => $stock) {
+            if ($stock < 0) {
+                throw new \InvalidArgumentException('Stock must be greater than or equal to 0');
+            }
             $keys[] = $this->keyPrefix . $sku;
             $args[] = max(0, (int)$stock);
         }
         $args[] = max(0, $ttl);  // TTL 作为最后一个参数
 
-        $count = $this->execLuaWithRetry('init', $keys, $args, $this->maxRetries);
+        $count = $this->execLuaWithRetry('init', $keys, $args);
         $this->log(LogLevel::INFO, 'Stocks initialized', [
             'count' => $count,
             'ttl' => $ttl
@@ -433,7 +269,7 @@ LUA,
     public function getStock(string $sku): array
     {
         $stockKey = $this->keyPrefix . $sku;
-        $soldOutKey = $stockKey . self::SOLD_OUT_SUFFIX;
+        $soldOutKey = $stockKey . RedisConstants::SOLD_OUT_SUFFIX;
 
         $attempt = 0;
         $lastException = null;
@@ -445,8 +281,8 @@ LUA,
                 $pipe->exists($soldOutKey);
                 $results = $pipe->exec();
 
-                if ($results === false) {
-                    throw new \RedisException('Pipeline exec returned false');
+                if ($results === false || count($results) < 2) {
+                    throw new \RedisException('Pipeline exec returned invalid results');
                 }
 
                 $stock = ($results[0] === false) ? null : (int)$results[0];
@@ -459,7 +295,7 @@ LUA,
                 }
                 $attempt++;
                 if ($attempt <= $this->maxRetries) {
-                    $sleepMicro = (int)pow(2, $attempt - 1) * self::RETRY_BASE_DELAY_MICROSECONDS;
+                    $sleepMicro = (int)pow(2, $attempt - 1) * RedisConstants::RETRY_BASE_DELAY_MICROSECONDS;
                     usleep($sleepMicro);
                     $this->log(LogLevel::WARNING, 'getStock transient error, retrying', [
                         'sku' => $sku,
@@ -540,7 +376,7 @@ LUA,
             self::CODE_SUCCESS
         ];
 
-        $res = $this->execLuaWithRetry('decr', $keys, $args, $this->maxRetries);
+        $res = $this->execLuaWithRetry('decr', $keys, $args);
         $code = (int)$res[0];
         $remain = $res[1] ?? 0;
 
@@ -582,7 +418,7 @@ LUA,
             self::CODE_ERR_NOT_EXISTS
         ];
 
-        $remain = $this->execLuaWithRetry('incr', $keys, $args, $this->maxRetries);
+        $remain = $this->execLuaWithRetry('incr', $keys, $args);
 
         if ($remain === self::CODE_ERR_NOT_EXISTS) {
             $this->log(LogLevel::WARNING, 'Stock increment failed: not exists', ['sku' => $sku]);
@@ -624,9 +460,8 @@ LUA,
         $args[] = self::CODE_ERR_NOT_EXISTS;
         $args[] = self::CODE_ERR_INSUFFICIENT;
 
-        $result = $this->execLuaWithRetry('decr_multi', $keys, $args, $this->maxRetries);
+        $result = $this->execLuaWithRetry('decr_multi', $keys, $args);
 
-        // 错误检测：Lua 返回数组且第一个元素为负值
         if (isset($result[0]) && $result[0] < 0) {
             $failedIndex = $result[1];
             $failedSku = $skuList[$failedIndex - 1] ?? 'unknown';
@@ -647,6 +482,10 @@ LUA,
                 'required' => $required,
                 'available' => $available
             ];
+        }
+
+        if (count($result) !== count($skuList)) {
+            throw new \RuntimeException('Lua result length mismatch');
         }
 
         // 成功：构造剩余库存映射
@@ -741,7 +580,7 @@ LUA,
         $keys = [$this->getStockKey($sku), $this->getSoldOutKey($sku)];
 
         try {
-            $res = (int)$this->execLuaWithRetry('repair', $keys, [], $this->maxRetries);
+            $res = (int)$this->execLuaWithRetry('repair', $keys, []);
 
             $actions = [
                 0 => 'consistent (both absent)',
