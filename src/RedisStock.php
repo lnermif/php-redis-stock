@@ -240,6 +240,11 @@ LUA,
         if (empty($stocks)) {
             return 0;
         }
+        if ($ttl > 0 && $ttl > RedisConstants::MAX_TTL) {
+            $originalTtl = $ttl;
+            $ttl = RedisConstants::MAX_TTL;
+            $this->log(LogLevel::INFO, 'TTL capped to MAX_TTL', ['original' => $originalTtl, 'capped' => $ttl]);
+        }
 
         $keys = [];
         $args = [];
@@ -287,7 +292,7 @@ LUA,
 
                 $stock = ($results[0] === false) ? null : (int)$results[0];
                 $soldOut = (bool)($results[1] ?? 0);
-                return ['stock' => $stock, 'soldOut' => $soldOut];
+                return ['code' => self::CODE_SUCCESS, 'stock' => $stock, 'soldOut' => $soldOut];
             } catch (\RedisException $e) {
                 $lastException = $e;
                 if (!$this->isTransientError($e)) {
@@ -296,6 +301,9 @@ LUA,
                 $attempt++;
                 if ($attempt <= $this->maxRetries) {
                     $sleepMicro = (int)pow(2, $attempt - 1) * RedisConstants::RETRY_BASE_DELAY_MICROSECONDS;
+                    if ($sleepMicro > RedisConstants::RETRY_MAX_DELAY_MICROSECONDS) {
+                        $sleepMicro = RedisConstants::RETRY_MAX_DELAY_MICROSECONDS;
+                    }
                     usleep($sleepMicro);
                     $this->log(LogLevel::WARNING, 'getStock transient error, retrying', [
                         'sku' => $sku,
@@ -310,9 +318,12 @@ LUA,
         $this->log(LogLevel::ERROR, 'getStock failed after retries', [
             'sku' => $sku,
             'error' => $lastException->getMessage(),
-            'exception' => $lastException
         ]);
-        throw new \RuntimeException('获取库存失败', self::CODE_ERR_REDIS_UNAVAILABLE, $lastException);
+        return [
+            'code' => self::CODE_ERR_REDIS_UNAVAILABLE,
+            'stock' => null,
+            'soldOut' => false
+        ];
     }
 
     /**
@@ -361,7 +372,15 @@ LUA,
     public function decrStock(string $sku, int $quantity): array
     {
         if ($quantity <= 0) {
-            $current = $this->getStock($sku)['stock'];
+            $stockInfo = $this->getStock($sku);
+            if ($stockInfo['code'] !== self::CODE_SUCCESS) {
+                // 如果获取库存失败，直接返回错误（无法确认当前库存）
+                return [
+                    'code' => $stockInfo['code'],
+                    'remain' => null
+                ];
+            }
+            $current = $stockInfo['stock'];
             return [
                 'code' => self::CODE_ERR_INVALID_QUANTITY,
                 'remain' => $current
@@ -405,7 +424,14 @@ LUA,
     public function incrStock(string $sku, int $quantity): array
     {
         if ($quantity <= 0) {
-            $current = $this->getStock($sku)['stock'];
+            $stockInfo = $this->getStock($sku);
+            if ($stockInfo['code'] !== self::CODE_SUCCESS) {
+                return [
+                    'code' => $stockInfo['code'],
+                    'remain' => null
+                ];
+            }
+            $current = $stockInfo['stock'];
             return [
                 'code' => self::CODE_ERR_INVALID_QUANTITY,
                 'remain' => $current
@@ -438,12 +464,22 @@ LUA,
     /**
      * 批量扣减库存
      * 原子性保证：利用 Lua 脚本实现伪事务（要么全部成功，要么全部失败）
+     *
+     * ⚠️ 集群兼容警告：此方法要求所有 SKU 的 Key 必须落在同一个 Redis Cluster Slot 中。
+     *     请确保构造时的 $keyPrefix 包含花括号 Hash Tag（如 '{product:stock}:'），
+     *     并且所有 SKU 使用相同的前缀（不需要额外处理）。
+     *     如果使用默认前缀，所有 Key 将共享同一个 Hash Tag 中的字符串，从而保证在同一 Slot。
+     *
      * @param array $items 关联数组 ['sku' => 数量]
      * @return array 成功：['success'=>true, 'code'=>CODE_SUCCESS, 'remain'=>[...]]
      *               失败：['success'=>false, 'code'=>错误码, 'sku'=>失败规格, 'required'=>需求量, 'available'=>可用量]
      */
     public function decrMultiStocks(array $items): array
     {
+        if (strpos($this->keyPrefix, '{') === false || strpos($this->keyPrefix, '}') === false) {
+            trigger_error('keyPrefix does not contain Hash Tag {}, may cause CROSSSLOT error in cluster mode', E_USER_WARNING);
+        }
+
         if (empty($items)) {
             return ['success' => false, 'code' => self::CODE_ERR_INVALID_QUANTITY];
         }
@@ -563,7 +599,7 @@ LUA,
             ];
         } catch (\RedisException $e) {
             $this->log(LogLevel::ERROR, "Monitor failed", ['sku' => $sku, 'exception' => $e]);
-            throw $e;
+            return ['code' => self::CODE_ERR_REDIS_UNAVAILABLE, 'exists' => false, 'stock' => 0, 'ttl' => -2, 'is_sold_out' => false, 'consistency' => false];
         }
     }
 

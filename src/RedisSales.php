@@ -63,7 +63,7 @@ class RedisSales extends AbstractRedisManager
         
         -- 5. 增加总销量和总销售额
         redis.call('incrby', sales_count_key, quantity)
-        redis.call('incrbyfloat', sales_amount_key, amount)
+        redis.call('incrby', sales_amount_key, amount)
         
         -- 6. 更新排行榜
         redis.call('zincrby', leaderboard_count_key, quantity, sku)
@@ -123,6 +123,11 @@ LUA
         if ($quantity <= 0) {
             return ['code' => self::CODE_ERR_INVALID_QUANTITY, 'message' => '数量无效', 'total_sales' => null];
         }
+        if ($amount < 0) {
+            return ['code' => self::CODE_ERR_INVALID_AMOUNT, 'message' => '金额不能为负数', 'total_sales' => null];
+        }
+        // 将元转为分
+        $amountInCents = (int)round($amount * 100);
 
         // --- 集群兼容核心逻辑 ---
         // 我们利用商品 SKU 作为 Hash Tag。
@@ -132,17 +137,17 @@ LUA
         $tag = $this->keyPrefix;
 
         // 1. 商品相关 Key
-        $userBoughtKey  = $tag . $sku . RedisConstants::USER_BOUGHT_HASH_SUFFIX;
-        $salesCountKey  = $tag . $sku . RedisConstants::SALES_COUNT_SUFFIX;
+        $userBoughtKey = $tag . $sku . RedisConstants::USER_BOUGHT_HASH_SUFFIX;
+        $salesCountKey = $tag . $sku . RedisConstants::SALES_COUNT_SUFFIX;
         $salesAmountKey = $tag . $sku . RedisConstants::SALES_AMOUNT_SUFFIX;
 
         // 2. 外部关联 Key（强制注入 $tag 以解决 CROSSSLOT）
-        $userSetKey     = $tag . 'user:' . $userId . ':purchased';
-        $orderKey       = $tag . 'order:' . $orderId;
+        $userSetKey = $tag . 'user:' . $userId . ':purchased';
+        $orderKey = $tag . 'order:' . $orderId;
 
         // 3. 排行榜 Key（同样需要注入 $tag）
         $leaderCountKey = $tag . RedisConstants::LEADERBOARD_COUNT_SUFFIX;
-        $leaderAmountKey= $tag . RedisConstants::LEADERBOARD_AMOUNT_SUFFIX;
+        $leaderAmountKey = $tag . RedisConstants::LEADERBOARD_AMOUNT_SUFFIX;
 
         $keys = [
             $userBoughtKey,   // KEYS[1]
@@ -157,7 +162,7 @@ LUA
         $args = [
             $userId,
             $quantity,
-            $amount,
+            $amountInCents,
             $limitPerUser,
             $sku,
             (int)self::CODE_ERR_ALREADY_PROCESSED,
@@ -268,7 +273,7 @@ LUA
     {
         $key = $this->keyPrefix . $sku . RedisConstants::SALES_AMOUNT_SUFFIX;
         $val = $this->redis->get($key);
-        return $val === false ? 0.0 : (float)$val;
+        return $val === false ? 0.0 : (float)($val / 100);
     }
 
     /**

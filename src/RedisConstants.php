@@ -63,6 +63,9 @@ final class RedisConstants
     /** 重试基础延迟微秒数（10ms） */
     public const RETRY_BASE_DELAY_MICROSECONDS = 10000;
 
+    /** 重试最大延迟微秒数（200ms） */
+    public const RETRY_MAX_DELAY_MICROSECONDS = 200000;
+
     // -------------------------------------------------------------------------
     // 默认过期时间（秒）
     // -------------------------------------------------------------------------
@@ -70,6 +73,8 @@ final class RedisConstants
     public const DEFAULT_USER_RECORD_TTL = 2592000;
     /** 订单幂等标记过期时间（24小时） */
     public const DEFAULT_ORDER_TTL = 86400;
+    /** 最大过期时间（30天） */
+    public const MAX_TTL = 2592000;
 
     // -------------------------------------------------------------------------
     // Lua 脚本占位符

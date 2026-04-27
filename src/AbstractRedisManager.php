@@ -130,7 +130,7 @@ abstract class AbstractRedisManager
      * @param array $keys 键
      * @param array $args 参数
      * @param int|null $maxRetries 最大重试次数
-     * @return void
+     * @return mixed
      */
     protected function execLuaWithRetry(string $scriptName, array $keys, array $args, ?int $maxRetries = null)
     {
@@ -149,6 +149,9 @@ abstract class AbstractRedisManager
                 $attempt++;
                 if ($attempt <= $maxRetries) {
                     $sleepMicro = (int)pow(2, $attempt - 1) * RedisConstants::RETRY_BASE_DELAY_MICROSECONDS;
+                    if ($sleepMicro > RedisConstants::RETRY_MAX_DELAY_MICROSECONDS) {
+                        $sleepMicro = RedisConstants::RETRY_MAX_DELAY_MICROSECONDS;
+                    }
                     usleep($sleepMicro);
                     $this->log(LogLevel::WARNING, "Transient error for {$scriptName}, retrying", [
                         'attempt' => $attempt,
