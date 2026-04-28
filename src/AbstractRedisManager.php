@@ -49,6 +49,7 @@ abstract class AbstractRedisManager
         $this->logger = $logger ?: new NullLogger();
         $this->maxRetries = $maxRetries ?? RedisConstants::DEFAULT_MAX_RETRIES;
         $this->loadScripts();
+        $this->verifyKeyPrefix();
     }
 
     protected function log(string $level, string $message, array $context = []): void
@@ -166,5 +167,18 @@ abstract class AbstractRedisManager
             'error' => $lastException->getMessage() ?? 'Unknown error',
         ]);
         throw new \RuntimeException('服务繁忙，请稍后重试', RedisConstants::CODE_ERR_REDIS_UNAVAILABLE, $lastException);
+    }
+
+    /**
+     * 验证 Key 前缀的集群兼容性
+     * @return void
+     */
+    protected function verifyKeyPrefix(): void
+    {
+        if (strpos($this->keyPrefix, '{') === false || strpos($this->keyPrefix, '}') === false) {
+            $this->log(LogLevel::WARNING, 'keyPrefix does not contain Hash Tag {} (e.g., "{product:stock}:"), may cause CROSSSLOT error in Redis Cluster mode', [
+                'keyPrefix' => $this->keyPrefix
+            ]);
+        }
     }
 }

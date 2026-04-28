@@ -476,10 +476,6 @@ LUA,
      */
     public function decrMultiStocks(array $items): array
     {
-        if (strpos($this->keyPrefix, '{') === false || strpos($this->keyPrefix, '}') === false) {
-            trigger_error('keyPrefix does not contain Hash Tag {}, may cause CROSSSLOT error in cluster mode', E_USER_WARNING);
-        }
-
         if (empty($items)) {
             return ['success' => false, 'code' => self::CODE_ERR_INVALID_QUANTITY];
         }
