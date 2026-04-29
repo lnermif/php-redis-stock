@@ -100,23 +100,27 @@ LUA,
 LUA,
         'decr_multi' => <<<LUA
                 local soldout_suffix = '{{SOLD_OUT_SUFFIX}}'
+                local CODE_ERR_NOT_EXISTS = tonumber(ARGV[1])
+                local CODE_ERR_INSUFFICIENT = tonumber(ARGV[2])
+                local num_items = #KEYS
+                
                 -- 第一遍：全量校验
-                for i = 1, #KEYS do
+                for i = 1, num_items do
                     local key = KEYS[i]
-                    local qty = tonumber(ARGV[i])
+                    local qty = tonumber(ARGV[i + 2])
                     local stock = redis.call('get', key)
                     if stock == false then
-                        return {tonumber(ARGV[#ARGV - 1]), i, 0}
+                        return {CODE_ERR_NOT_EXISTS, i, 0}
                     end
                     stock = tonumber(stock)
                     if stock < qty then
-                        return {tonumber(ARGV[#ARGV]), i, stock}
+                        return {CODE_ERR_INSUFFICIENT, i, stock}
                     end
                 end
                 local remains = {}
-                for i = 1, #KEYS do
+                for i = 1, num_items do
                     local key = KEYS[i]
-                    local qty = tonumber(ARGV[i])
+                    local qty = tonumber(ARGV[i + 2])
                     local remain = redis.call('decrby', key, qty)
                     remains[i] = remain
                     if remain == 0 then
@@ -197,11 +201,14 @@ LUA,
 
     protected function prepareScript(string $scriptName, string $script): string
     {
-        return str_replace(
-            RedisConstants::LUA_PLACEHOLDER_SOLD_OUT_SUFFIX,
-            RedisConstants::SOLD_OUT_SUFFIX,
-            $script
-        );
+        return parent::prepareScript($scriptName, $script);
+    }
+
+    protected function getPlaceholders(): array
+    {
+        return [
+            RedisConstants::LUA_PLACEHOLDER_SOLD_OUT_SUFFIX => RedisConstants::SOLD_OUT_SUFFIX,
+        ];
     }
 
     /**
@@ -240,7 +247,10 @@ LUA,
         if (empty($stocks)) {
             return 0;
         }
-        if ($ttl > 0 && $ttl > RedisConstants::MAX_TTL) {
+        if ($ttl < 0) {
+            throw new \InvalidArgumentException('TTL must be >= 0');
+        }
+        if ($ttl > RedisConstants::MAX_TTL) {
             $originalTtl = $ttl;
             $ttl = RedisConstants::MAX_TTL;
             $this->log(LogLevel::INFO, 'TTL capped to MAX_TTL', ['original' => $originalTtl, 'capped' => $ttl]);
@@ -249,7 +259,10 @@ LUA,
         $keys = [];
         $args = [];
         foreach ($stocks as $sku => $stock) {
-            if ($stock < 0) {
+            if (!is_numeric($stock)) {
+                throw new \InvalidArgumentException("Stock for SKU {$sku} must be a numeric value");
+            }
+            if ((int)$stock < 0) {
                 throw new \InvalidArgumentException('Stock must be greater than or equal to 0');
             }
             $keys[] = $this->keyPrefix . $sku;
@@ -269,94 +282,92 @@ LUA,
      * 获取单个商品库存及售罄状态（带重试）
      *
      * @param string $sku
-     * @return array ['stock' => int|null, 'soldOut' => bool]
+     * @return array ['code' => int, 'stock' => int|null, 'soldOut' => bool]
      */
     public function getStock(string $sku): array
     {
         $stockKey = $this->keyPrefix . $sku;
         $soldOutKey = $stockKey . RedisConstants::SOLD_OUT_SUFFIX;
 
-        $attempt = 0;
-        $lastException = null;
-
-        while ($attempt <= $this->maxRetries) {
-            try {
-                $pipe = $this->redis->multi(\Redis::PIPELINE);
+        try {
+            $results = $this->readWithRetry(function ($redis) use ($stockKey, $soldOutKey) {
+                $pipe = $redis->multi(\Redis::PIPELINE);
                 $pipe->get($stockKey);
                 $pipe->exists($soldOutKey);
-                $results = $pipe->exec();
+                return $pipe->exec();
+            });
 
-                if ($results === false || count($results) < 2) {
-                    throw new \RedisException('Pipeline exec returned invalid results');
-                }
-
-                $stock = ($results[0] === false) ? null : (int)$results[0];
-                $soldOut = (bool)($results[1] ?? 0);
-                return ['code' => self::CODE_SUCCESS, 'stock' => $stock, 'soldOut' => $soldOut];
-            } catch (\RedisException $e) {
-                $lastException = $e;
-                if (!$this->isTransientError($e)) {
-                    break;
-                }
-                $attempt++;
-                if ($attempt <= $this->maxRetries) {
-                    $sleepMicro = (int)pow(2, $attempt - 1) * RedisConstants::RETRY_BASE_DELAY_MICROSECONDS;
-                    if ($sleepMicro > RedisConstants::RETRY_MAX_DELAY_MICROSECONDS) {
-                        $sleepMicro = RedisConstants::RETRY_MAX_DELAY_MICROSECONDS;
-                    }
-                    usleep($sleepMicro);
-                    $this->log(LogLevel::WARNING, 'getStock transient error, retrying', [
-                        'sku' => $sku,
-                        'attempt' => $attempt,
-                        'sleep_ms' => $sleepMicro / 1000,
-                        'exception' => $e
-                    ]);
-                }
+            if ($results === false || !is_array($results) || count($results) < 2) {
+                throw new \RuntimeException('Pipeline exec returned invalid results');
             }
-        }
 
-        $this->log(LogLevel::ERROR, 'getStock failed after retries', [
-            'sku' => $sku,
-            'error' => $lastException->getMessage(),
-        ]);
-        return [
-            'code' => self::CODE_ERR_REDIS_UNAVAILABLE,
-            'stock' => null,
-            'soldOut' => false
-        ];
+            $stockRaw = $results[0];
+            $soldOutRaw = $results[1] ?? 0;
+            
+            $stock = ($stockRaw === false || $stockRaw === null) ? null : (int)$stockRaw;
+            $soldOut = ($soldOutRaw === false || $soldOutRaw === null) ? false : (bool)$soldOutRaw;
+            return ['code' => self::CODE_SUCCESS, 'stock' => $stock, 'soldOut' => $soldOut];
+        } catch (\RuntimeException $e) {
+            $this->log(LogLevel::ERROR, 'getStock failed', [
+                'sku' => $sku,
+                'error' => $e->getMessage(),
+            ]);
+            return [
+                'code' => self::CODE_ERR_REDIS_UNAVAILABLE,
+                'stock' => null,
+                'soldOut' => false
+            ];
+        }
     }
 
     /**
      * 批量获取库存（仅数量，不包含售罄状态）
      *
      * @param array $skus
-     * @return array ['sku' => int|null]
+     * @return array ['code' => int, 'data' => ['sku' => int|null]]
      */
     public function getStocks(array $skus): array
     {
         if (empty($skus)) {
-            return [];
+            return ['code' => self::CODE_SUCCESS, 'data' => []];
         }
-        $keys = array_map(function ($sku) {
-            return $this->keyPrefix . $sku;
-        }, $skus);
-        $values = $this->redis->mget($keys);
-        $result = [];
-        foreach ($skus as $i => $sku) {
-            $result[$sku] = ($values[$i] === false) ? null : (int)$values[$i];
+        try {
+            $keys = array_map(function ($sku) {
+                return $this->keyPrefix . $sku;
+            }, $skus);
+            $values = $this->readWithRetry(function ($redis) use ($keys) {
+                return $redis->mget($keys);
+            });
+            if (!is_array($values) || count($values) !== count($skus)) {
+                throw new \RuntimeException('mget returned invalid number of results');
+            }
+            $result = [];
+            foreach ($skus as $i => $sku) {
+                $result[$sku] = ($values[$i] === false) ? null : (int)$values[$i];
+            }
+            return ['code' => self::CODE_SUCCESS, 'data' => $result];
+        } catch (\RuntimeException $e) {
+            return ['code' => self::CODE_ERR_REDIS_UNAVAILABLE, 'data' => []];
         }
-        return $result;
     }
 
     /**
      * 检查是否已售罄（轻量级查询，可用于网关快速拦截）
      *
      * @param string $sku
-     * @return bool
+     * @return array ['code' => int, 'soldOut' => bool]
      */
-    public function isSoldOut(string $sku): bool
+    public function isSoldOut(string $sku): array
     {
-        return (bool)$this->redis->exists($this->getSoldOutKey($sku));
+        try {
+            $soldOutKey = $this->getSoldOutKey($sku);
+            $result = $this->readWithRetry(function ($redis) use ($soldOutKey) {
+                return $redis->exists($soldOutKey);
+            });
+            return ['code' => self::CODE_SUCCESS, 'soldOut' => (bool)$result];
+        } catch (\RuntimeException $e) {
+            return ['code' => self::CODE_ERR_REDIS_UNAVAILABLE, 'soldOut' => false];
+        }
     }
 
     /**
@@ -372,18 +383,9 @@ LUA,
     public function decrStock(string $sku, int $quantity): array
     {
         if ($quantity <= 0) {
-            $stockInfo = $this->getStock($sku);
-            if ($stockInfo['code'] !== self::CODE_SUCCESS) {
-                // 如果获取库存失败，直接返回错误（无法确认当前库存）
-                return [
-                    'code' => $stockInfo['code'],
-                    'remain' => null
-                ];
-            }
-            $current = $stockInfo['stock'];
             return [
                 'code' => self::CODE_ERR_INVALID_QUANTITY,
-                'remain' => $current
+                'remain' => null
             ];
         }
 
@@ -424,17 +426,9 @@ LUA,
     public function incrStock(string $sku, int $quantity): array
     {
         if ($quantity <= 0) {
-            $stockInfo = $this->getStock($sku);
-            if ($stockInfo['code'] !== self::CODE_SUCCESS) {
-                return [
-                    'code' => $stockInfo['code'],
-                    'remain' => null
-                ];
-            }
-            $current = $stockInfo['stock'];
             return [
                 'code' => self::CODE_ERR_INVALID_QUANTITY,
-                'remain' => $current
+                'remain' => null
             ];
         }
 
@@ -480,17 +474,36 @@ LUA,
             return ['success' => false, 'code' => self::CODE_ERR_INVALID_QUANTITY];
         }
 
-        $skuList = array_keys($items);  // 固定顺序，用于失败时定位 SKU
-        $keys = [];
-        $args = [];
-        foreach ($skuList as $sku) {
-            $keys[] = $this->getStockKey($sku);
-            $args[] = max(0, (int)$items[$sku]);
+        foreach ($items as $sku => $quantity) {
+            if (!is_numeric($quantity)) {
+                return [
+                    'success' => false,
+                    'code' => self::CODE_ERR_INVALID_QUANTITY,
+                    'sku' => $sku,
+                    'message' => "SKU {$sku} 的扣减数量无效"
+                ];
+            }
+            if ((int)$quantity <= 0) {
+                return [
+                    'success' => false,
+                    'code' => self::CODE_ERR_INVALID_QUANTITY,
+                    'sku' => $sku,
+                    'message' => "SKU {$sku} 的扣减数量无效"
+                ];
+            }
         }
 
-        // 附加参数：NOT_EXISTS 码、INSUFFICIENT 码
+        $skuList = array_keys($items);
+        $keys = [];
+        $args = [];
+        
         $args[] = self::CODE_ERR_NOT_EXISTS;
         $args[] = self::CODE_ERR_INSUFFICIENT;
+        
+        foreach ($skuList as $sku) {
+            $keys[] = $this->getStockKey($sku);
+            $args[] = (int)$items[$sku];
+        }
 
         $result = $this->execLuaWithRetry('decr_multi', $keys, $args);
 
@@ -535,20 +548,27 @@ LUA,
      * 删除库存及相关售罄标记（危险操作，一般仅用于测试或重置）
      *
      * @param string $sku
-     * @return int 删除的 Key 数量
+     * @return array ['code' => int, 'deleted' => int]
      */
-    public function delStock(string $sku): int
+    public function delStock(string $sku): array
     {
-        $keys = [$this->getStockKey($sku), $this->getSoldOutKey($sku)];
-        $deleted = $this->redis->del($keys);
-        $this->log(LogLevel::INFO, 'Stock deleted', ['sku' => $sku, 'deleted' => $deleted]);
-        return $deleted;
+        try {
+            $keys = [$this->getStockKey($sku), $this->getSoldOutKey($sku)];
+            $deleted = $this->writeWithRetry(function ($redis) use ($keys) {
+                return $redis->del($keys);
+            });
+            $this->log(LogLevel::INFO, 'Stock deleted', ['sku' => $sku, 'deleted' => $deleted]);
+            return ['code' => self::CODE_SUCCESS, 'deleted' => $deleted];
+        } catch (\RuntimeException $e) {
+            $this->log(LogLevel::ERROR, 'Stock delete failed', ['sku' => $sku, 'error' => $e->getMessage()]);
+            return ['code' => self::CODE_ERR_REDIS_UNAVAILABLE, 'deleted' => 0];
+        }
     }
 
     /**
      * 监控特定规格的状态一致性
      * @param string $sku
-     * @return array
+     * @return array ['code' => int, 'exists' => bool, 'stock' => int, 'ttl' => int, 'is_sold_out' => bool, 'consistency' => bool]
      */
     public function monitor(string $sku): array
     {
@@ -556,14 +576,16 @@ LUA,
         $soldOutKey = $this->getSoldOutKey($sku);
 
         try {
-            $pipe = $this->redis->multi(\Redis::PIPELINE);
-            $pipe->get($stockKey);
-            $pipe->ttl($stockKey);
-            $pipe->exists($soldOutKey);
-            $res = $pipe->exec();
+            $res = $this->pipelineWithRetry(function ($redis) use ($stockKey, $soldOutKey) {
+                $pipe = $redis->multi(\Redis::PIPELINE);
+                $pipe->get($stockKey);
+                $pipe->ttl($stockKey);
+                $pipe->exists($soldOutKey);
+                return $pipe->exec();
+            });
 
-            if ($res === false) {
-                throw new \RedisException('Pipeline exec failed');
+            if ($res === false || !is_array($res) || count($res) < 3) {
+                throw new \RuntimeException('Pipeline exec returned invalid results');
             }
 
             $stockValue = $res[0];
@@ -572,30 +594,35 @@ LUA,
             $exists = ($stockValue !== false);
             $stock = $exists ? (int)$stockValue : 0;
 
-            // 修正后的 monitor 一致性判断
             $consistency = true;
             if (!$exists) {
-                // 场景：库存 Key 没了，但售罄标记还在（孤立标记）
                 if ($hasSoldOut) {
                     $consistency = false;
                 }
             } else {
-                // 场景：库存还在，但标记状态对不上
                 if (($stock > 0 && $hasSoldOut) || ($stock <= 0 && !$hasSoldOut)) {
                     $consistency = false;
                 }
             }
 
             return [
+                'code' => self::CODE_SUCCESS,
                 'exists' => $exists,
                 'stock' => $stock,
                 'ttl' => $ttl,
                 'is_sold_out' => $hasSoldOut,
                 'consistency' => $consistency,
             ];
-        } catch (\RedisException $e) {
-            $this->log(LogLevel::ERROR, "Monitor failed", ['sku' => $sku, 'exception' => $e]);
-            return ['code' => self::CODE_ERR_REDIS_UNAVAILABLE, 'exists' => false, 'stock' => 0, 'ttl' => -2, 'is_sold_out' => false, 'consistency' => false];
+        } catch (\RuntimeException $e) {
+            $this->log(LogLevel::ERROR, "Monitor failed", ['sku' => $sku, 'error' => $e->getMessage()]);
+            return [
+                'code' => self::CODE_ERR_REDIS_UNAVAILABLE,
+                'exists' => false,
+                'stock' => 0,
+                'ttl' => -2,
+                'is_sold_out' => false,
+                'consistency' => false
+            ];
         }
     }
 
@@ -605,7 +632,7 @@ LUA,
      * 修复场景包括：孤立标记清除、缺失标记补全、库存与标记状态同步。
      *
      * @param string $sku
-     * @return array [success => bool, action => string]
+     * @return array ['code' => int, 'success' => bool, 'action' => string]
      */
     public function repair(string $sku): array
     {
@@ -628,13 +655,18 @@ LUA,
             }
 
             return [
+                'code' => self::CODE_SUCCESS,
                 'success' => true,
                 'action' => $actionText,
-                'code' => $res
+                'repair_code' => $res
             ];
         } catch (\Exception $e) {
-            $this->log(LogLevel::ERROR, "Repair failed", ['sku' => $sku, 'exception' => $e]);
-            return ['success' => false, 'error' => $e->getMessage()];
+            $this->log(LogLevel::ERROR, "Repair failed", ['sku' => $sku, 'error' => $e->getMessage()]);
+            return [
+                'code' => self::CODE_ERR_REDIS_UNAVAILABLE,
+                'success' => false,
+                'action' => 'repair failed'
+            ];
         }
     }
 }
