@@ -6,6 +6,7 @@ use PHPUnit\Framework\TestCase;
 use Nermif\RedisStock;
 use Redis;
 use Psr\Log\NullLogger;
+use Nermif\RedisConstants;
 
 /**
  * RedisStock 生产级全路径单元测试套件
@@ -34,9 +35,6 @@ class RedisStockTest extends TestCase
         $this->redis->close();
     }
 
-    /**
-     * 清理测试环境，防止用例间数据干扰
-     */
     private function cleanup(): void
     {
         $keys = $this->redis->keys($this->testPrefix . '*');
@@ -45,9 +43,6 @@ class RedisStockTest extends TestCase
         }
     }
 
-    /**
-     * 辅助断言：兼容不同 php-redis 版本的 exists 返回值（整数 vs 布尔值）
-     */
     private function assertKeyExists(string $key, bool $expected): void
     {
         $exists = $this->redis->exists($key);
@@ -56,25 +51,18 @@ class RedisStockTest extends TestCase
     }
 
     // -------------------------------------------------------------------------
-    // 1. 初始化与获取测试 (Init & Get)
+    // 1. 初始化与获取测试
     // -------------------------------------------------------------------------
 
-    /**
-     * 测试：初始化 0 库存
-     * 预期：库存值为 0，且自动创建售罄标记（soldOut 为 true）
-     */
     public function testInitStocksZeroQuantity()
     {
         $this->stockManager->initStocks(['ZERO' => 0]);
         $res = $this->stockManager->getStock('ZERO');
+        $this->assertEquals(RedisStock::CODE_SUCCESS, $res['code']);
         $this->assertEquals(0, $res['stock']);
         $this->assertTrue($res['soldOut']);
     }
 
-    /**
-     * 测试：设置带 TTL 的库存
-     * 预期：初始化后可获取，休眠超过 TTL 时间后，Redis 自动删除 Key，获取返回空
-     */
     public function testInitStocksWithTTL()
     {
         $sku = 'TTL_SKU';
@@ -84,26 +72,40 @@ class RedisStockTest extends TestCase
         $this->assertNull($this->stockManager->getStock($sku)['stock']);
     }
 
-    /**
-     * 测试：批量获取库存（包含存在和不存在的 SKU）
-     * 预期：存在的返回具体数值，不存在或空字符串的返回 null
-     */
     public function testGetStocksMix()
     {
         $this->stockManager->initStocks(['EXISTS' => 50]);
         $result = $this->stockManager->getStocks(['EXISTS', 'NOT_EXISTS', '']);
-        $this->assertEquals(50, $result['EXISTS']);
-        $this->assertNull($result['NOT_EXISTS']);
+        $this->assertEquals(RedisStock::CODE_SUCCESS, $result['code']);
+        $this->assertEquals(50, $result['data']['EXISTS']);
+        $this->assertNull($result['data']['NOT_EXISTS']);
+    }
+
+    public function testGetStocksEmptyArray()
+    {
+        $result = $this->stockManager->getStocks([]);
+        $this->assertEquals(RedisStock::CODE_SUCCESS, $result['code']);
+        $this->assertEmpty($result['data']);
+    }
+
+    public function testInitStocksInvalidNumericType()
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('must be a numeric value');
+        $this->stockManager->initStocks(['INVALID' => 'abc']);
+    }
+
+    public function testInitStocksNegativeValue()
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('greater than or equal to 0');
+        $this->stockManager->initStocks(['NEG' => -5]);
     }
 
     // -------------------------------------------------------------------------
-    // 2. 边界拦截：针对不存在 SKU 的操作
+    // 2. 边界拦截：不存在 SKU
     // -------------------------------------------------------------------------
 
-    /**
-     * 测试：扣减从未初始化的 SKU
-     * 预期：返回 CODE_ERR_NOT_EXISTS，剩余库存返回 null
-     */
     public function testDecrStockNotExists()
     {
         $res = $this->stockManager->decrStock('GHOST_SKU', 5);
@@ -111,10 +113,6 @@ class RedisStockTest extends TestCase
         $this->assertNull($res['remain']);
     }
 
-    /**
-     * 测试：补货（增加）从未初始化的 SKU
-     * 预期：返回 CODE_ERR_NOT_EXISTS，禁止非初始化写入
-     */
     public function testIncrStockNotExists()
     {
         $res = $this->stockManager->incrStock('GHOST_SKU', 10);
@@ -122,13 +120,9 @@ class RedisStockTest extends TestCase
     }
 
     // -------------------------------------------------------------------------
-    // 3. 正常增减库存测试 (Incr & Decr)
+    // 3. 正常增减库存测试
     // -------------------------------------------------------------------------
 
-    /**
-     * 测试：库存不足时的扣减
-     * 预期：返回 CODE_ERR_INSUFFICIENT，余额保持不变（不扣成负数）
-     */
     public function testDecrStockInsufficient()
     {
         $sku = 'INSUF';
@@ -138,36 +132,24 @@ class RedisStockTest extends TestCase
         $this->assertEquals(5, $res['remain']);
     }
 
-    /**
-     * 测试：正好扣减至 0
-     * 预期：返回成功，余额为 0，且系统自动打上售罄标记
-     */
     public function testDecrStockToZero()
     {
         $sku = 'TO_ZERO';
         $this->stockManager->initStocks([$sku => 1]);
         $this->stockManager->decrStock($sku, 1);
-        $this->assertTrue($this->stockManager->isSoldOut($sku));
+        $this->assertTrue($this->stockManager->isSoldOut($sku)['soldOut']);
     }
 
-    /**
-     * 测试：补货清除售罄状态
-     * 预期：原本 0 库存（已售罄），增加库存后售罄标记被移除
-     */
     public function testIncrStockClearsSoldOut()
     {
         $sku = 'REFILL';
         $this->stockManager->initStocks([$sku => 0]);
-        $this->assertTrue($this->stockManager->isSoldOut($sku));
+        $this->assertTrue($this->stockManager->isSoldOut($sku)['soldOut']);
 
         $this->stockManager->incrStock($sku, 10);
-        $this->assertFalse($this->stockManager->isSoldOut($sku));
+        $this->assertFalse($this->stockManager->isSoldOut($sku)['soldOut']);
     }
 
-    /**
-     * 测试：无效的数量操作
-     * 预期：传入 0 或负数时，直接返回 CODE_ERR_INVALID_QUANTITY
-     */
     public function testInvalidQuantityOperations()
     {
         $sku = 'INVALID';
@@ -177,13 +159,17 @@ class RedisStockTest extends TestCase
     }
 
     // -------------------------------------------------------------------------
-    // 4. 批量操作与原子性 (Multi-Operations & Atomicity)
+    // 4. 批量操作与原子性
     // -------------------------------------------------------------------------
 
-    /**
-     * 测试：批量扣减的原子回滚
-     * 预期：同时扣减 A 和 B，若 B 库存不足，则 A 的扣减也必须回滚，保持初始状态
-     */
+    public function testDecrMultiStocksInvalidNumericType()
+    {
+        $this->stockManager->initStocks(['A' => 10]);
+        $res = $this->stockManager->decrMultiStocks(['A' => 'abc']);
+        $this->assertFalse($res['success']);
+        $this->assertEquals(RedisStock::CODE_ERR_INVALID_QUANTITY, $res['code']);
+    }
+
     public function testDecrMultiStocksAtomicRollback()
     {
         $this->stockManager->initStocks(['A' => 10, 'B' => 3]);
@@ -194,10 +180,6 @@ class RedisStockTest extends TestCase
         $this->assertEquals(10, $this->stockManager->getStock('A')['stock']);
     }
 
-    /**
-     * 测试：批量扣减包含不存在的 SKU
-     * 预期：由于其中一个 SKU 不存在，整个批量扣减操作不执行，已有库存不被扣减
-     */
     public function testDecrMultiStocksWithNonExistent()
     {
         $this->stockManager->initStocks(['A' => 10]);
@@ -208,13 +190,9 @@ class RedisStockTest extends TestCase
     }
 
     // -------------------------------------------------------------------------
-    // 5. 监控与自愈测试 (Monitor & Repair)
+    // 5. 监控与自愈测试
     // -------------------------------------------------------------------------
 
-    /**
-     * 测试：检测无效的售罄标记
-     * 预期：人工制造“有库存却有售罄标记”的冲突，monitor 应检测到不一致，repair 应移除错误标记
-     */
     public function testMonitorDetectsInvalidSoldOutMarker()
     {
         $sku = 'M1';
@@ -225,14 +203,10 @@ class RedisStockTest extends TestCase
         $this->assertFalse($res['consistency']);
 
         $repair = $this->stockManager->repair($sku);
-        $this->assertEquals(1, $repair['code']); // Action 1: 移除无效标记
-        $this->assertFalse($this->stockManager->isSoldOut($sku));
+        $this->assertEquals(1, $repair['repair_code']); // Action 1
+        $this->assertFalse($this->stockManager->isSoldOut($sku)['soldOut']);
     }
 
-    /**
-     * 测试：修复缺失的售罄标记
-     * 预期：人工制造“库存为 0 却没标记”的场景，repair 应补全标记（Action 2）
-     */
     public function testRepairAddsMissingSoldOutMarker()
     {
         $sku = 'M2';
@@ -240,62 +214,68 @@ class RedisStockTest extends TestCase
         $this->redis->del($this->testPrefix . $sku . ':soldout');
 
         $res = $this->stockManager->repair($sku);
-        $this->assertEquals(2, $res['code']);
-        $this->assertTrue($this->stockManager->isSoldOut($sku));
+        $this->assertEquals(2, $res['repair_code']);
+        $this->assertTrue($this->stockManager->isSoldOut($sku)['soldOut']);
     }
 
-    /**
-     * 测试：清理孤立的售罄标记
-     * 预期：模拟主库存 Key 丢失但标记残留，repair 应彻底清理残留标记（Action 4）
-     */
     public function testRepairCleansOrphanedMarker()
     {
         $sku = 'ORPHAN';
         $this->redis->set($this->testPrefix . $sku . ':soldout', 1);
 
         $res = $this->stockManager->repair($sku);
-        $this->assertEquals(4, $res['code']);
+        $this->assertEquals(4, $res['repair_code']);
         $this->assertKeyExists($this->testPrefix . $sku . ':soldout', false);
     }
 
-    /**
-     * 测试：修复的幂等性
-     * 预期：对状态正常的 SKU 多次调用 repair，应始终返回一致状态（Action 3），不执行额外操作
-     */
     public function testRepairIdempotency()
     {
         $sku = 'IDEM';
         $this->stockManager->initStocks([$sku => 10]);
         $this->stockManager->repair($sku);
         $res = $this->stockManager->repair($sku);
-        $this->assertEquals(3, $res['code']);
+        $this->assertEquals(3, $res['repair_code']);
     }
 
     // -------------------------------------------------------------------------
     // 6. 生命周期、特殊字符与并发模拟
     // -------------------------------------------------------------------------
 
-    /**
-     * 测试：删除库存后的生命周期
-     * 预期：删除 SKU 后，主 Key 和标记均消失，且后续增减操作均因“不存在”而拦截
-     */
     public function testDelStockLifecycle()
     {
         $sku = 'DEL';
         $this->stockManager->initStocks([$sku => 10]);
-        $this->stockManager->delStock($sku);
+        $res = $this->stockManager->delStock($sku);
+
+        $this->assertEquals(RedisStock::CODE_SUCCESS, $res['code']);
+        $this->assertGreaterThanOrEqual(1, $res['deleted']);
 
         $this->assertNull($this->stockManager->getStock($sku)['stock']);
         $this->assertKeyExists($this->testPrefix . $sku . ':soldout', false);
 
-        $res = $this->stockManager->incrStock($sku, 5);
-        $this->assertEquals(RedisStock::CODE_ERR_NOT_EXISTS, $res['code']);
+        $incrRes = $this->stockManager->incrStock($sku, 5);
+        $this->assertEquals(RedisStock::CODE_ERR_NOT_EXISTS, $incrRes['code']);
     }
 
-    /**
-     * 测试：SKU 包含特殊字符及 Hash Tag
-     * 预期：系统应能正确处理包含大括号、井号等特殊字符的 SKU（确保集群 KeySlot 一致性）
-     */
+    public function testMonitorReturnStructure()
+    {
+        $sku = 'MONITOR_STRUCT';
+        $this->stockManager->initStocks([$sku => 10]);
+        $res = $this->stockManager->monitor($sku);
+
+        $this->assertArrayHasKey('code', $res);
+        $this->assertArrayHasKey('exists', $res);
+        $this->assertArrayHasKey('stock', $res);
+        $this->assertArrayHasKey('ttl', $res);
+        $this->assertArrayHasKey('is_sold_out', $res);
+        $this->assertArrayHasKey('consistency', $res);
+
+        $this->assertEquals(RedisStock::CODE_SUCCESS, $res['code']);
+        $this->assertTrue($res['exists']);
+        $this->assertEquals(10, $res['stock']);
+        $this->assertTrue($res['consistency']);
+    }
+
     public function testSpecialCharacters()
     {
         $sku = 'PROD:123#{HASH}';
@@ -303,10 +283,6 @@ class RedisStockTest extends TestCase
         $this->assertEquals(100, $this->stockManager->getStock($sku)['stock']);
     }
 
-    /**
-     * 测试：高频串行模拟
-     * 预期：初始化 10 个库存，执行 15 次扣减，严格保证只有前 10 次成功，后 5 次失败，且最终库存为 0
-     */
     public function testConcurrentSimulation()
     {
         $sku = 'CONCUR';
@@ -321,5 +297,164 @@ class RedisStockTest extends TestCase
             }
         }
         $this->assertEquals(0, $this->stockManager->getStock($sku)['stock']);
+    }
+
+    // =========================================================================
+    // 以下为补充的边界测试方法
+    // =========================================================================
+
+    /**
+     * 测试：incrStock 正常补货成功（直接校验返回值）
+     */
+    public function testIncrStockSuccess()
+    {
+        $sku = 'INCR_OK';
+        $this->stockManager->initStocks([$sku => 5]);
+        $res = $this->stockManager->incrStock($sku, 3);
+        $this->assertEquals(RedisStock::CODE_SUCCESS, $res['code']);
+        $this->assertEquals(8, $res['remain']);
+        $this->assertEquals(8, $this->stockManager->getStock($sku)['stock']);
+    }
+
+    /**
+     * 测试：incrStock 对不存在的 SKU 返回 remain 为 null
+     */
+    public function testIncrStockNotExistsRemain()
+    {
+        $res = $this->stockManager->incrStock('GHOST_INCR', 5);
+        $this->assertEquals(RedisStock::CODE_ERR_NOT_EXISTS, $res['code']);
+        $this->assertNull($res['remain']);
+    }
+
+    /**
+     * 测试：decrStock 正常扣减成功（校验 remain 字段）
+     */
+    public function testDecrStockSuccess()
+    {
+        $sku = 'DECR_OK';
+        $this->stockManager->initStocks([$sku => 10]);
+        $res = $this->stockManager->decrStock($sku, 3);
+        $this->assertEquals(RedisStock::CODE_SUCCESS, $res['code']);
+        $this->assertEquals(7, $res['remain']);
+        $this->assertEquals(7, $this->stockManager->getStock($sku)['stock']);
+    }
+
+    /**
+     * 测试：getStock 返回值结构（包含 code, stock, soldOut）
+     */
+    public function testGetStockStructure()
+    {
+        $sku = 'STRUCT';
+        $this->stockManager->initStocks([$sku => 5]);
+        $res = $this->stockManager->getStock($sku);
+        $this->assertArrayHasKey('code', $res);
+        $this->assertArrayHasKey('stock', $res);
+        $this->assertArrayHasKey('soldOut', $res);
+        $this->assertEquals(RedisStock::CODE_SUCCESS, $res['code']);
+        $this->assertEquals(5, $res['stock']);
+        $this->assertFalse($res['soldOut']);
+    }
+
+    /**
+     * 测试：getStock 查询不存在的 SKU
+     */
+    public function testGetStockNotExists()
+    {
+        $res = $this->stockManager->getStock('GHOST_GET');
+        $this->assertEquals(RedisStock::CODE_SUCCESS, $res['code']); // 查询成功但 stock 为 null
+        $this->assertNull($res['stock']);
+        $this->assertFalse($res['soldOut']);
+    }
+
+    /**
+     * 测试：isSoldOut 查询不存在的 SKU
+     */
+    public function testIsSoldOutNotExists()
+    {
+        $res = $this->stockManager->isSoldOut('GHOST_SOLDOUT');
+        $this->assertEquals(RedisStock::CODE_SUCCESS, $res['code']);
+        $this->assertFalse($res['soldOut']);
+    }
+
+    /**
+     * 测试：decrMultiStocks 批量扣减成功场景
+     */
+    public function testDecrMultiStocksSuccess()
+    {
+        $this->stockManager->initStocks(['MULTI_A' => 10, 'MULTI_B' => 20, 'MULTI_C' => 30]);
+        $items = ['MULTI_A' => 2, 'MULTI_B' => 5, 'MULTI_C' => 8];
+        $res = $this->stockManager->decrMultiStocks($items);
+        $this->assertTrue($res['success']);
+        $this->assertEquals(RedisStock::CODE_SUCCESS, $res['code']);
+        $this->assertCount(3, $res['remain']);
+        $this->assertEquals(8, $res['remain']['MULTI_A']);
+        $this->assertEquals(15, $res['remain']['MULTI_B']);
+        $this->assertEquals(22, $res['remain']['MULTI_C']);
+    }
+
+    /**
+     * 测试：decrMultiStocks 空数组输入
+     */
+    public function testDecrMultiStocksEmptyArray()
+    {
+        $res = $this->stockManager->decrMultiStocks([]);
+        $this->assertFalse($res['success']);
+        $this->assertEquals(RedisStock::CODE_ERR_INVALID_QUANTITY, $res['code']);
+    }
+
+    /**
+     * 测试：initStocks TTL 超过最大值被截断
+     */
+    public function testInitStocksTtlCapped()
+    {
+        $sku = 'TTL_CAP';
+        $ttl = RedisConstants::MAX_TTL + 100;
+        $this->stockManager->initStocks([$sku => 10], $ttl);
+        // 验证 Key 的 TTL 不大于 MAX_TTL（由于测试环境可快速过期，这里只检查 TTL 值 ≤ MAX_TTL）
+        $stockKey = $this->testPrefix . $sku;
+        $actualTtl = $this->redis->ttl($stockKey);
+        // TTL 可能为 -1（永不过期）或大于 0
+        if ($actualTtl > 0) {
+            $this->assertLessThanOrEqual(RedisConstants::MAX_TTL, $actualTtl);
+        } else {
+            $this->assertEquals(-1, $actualTtl, 'TTL 可能被设为永不过期（当原 TTL 为 0 时）');
+        }
+    }
+
+    /**
+     * 测试：initStocks TTL 为负数抛异常
+     */
+    public function testInitStocksNegativeTtl()
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('TTL must be >= 0');
+        $this->stockManager->initStocks(['NEG_TTL' => 10], -5);
+    }
+
+    /**
+     * 测试：repair 对不存在的 SKU（两者都不存在）返回 repair_code 0
+     */
+    public function testRepairBothAbsent()
+    {
+        $sku = 'BOTH_ABSENT';
+        $res = $this->stockManager->repair($sku);
+        $this->assertEquals(RedisStock::CODE_SUCCESS, $res['code']);
+        $this->assertTrue($res['success']);
+        $this->assertEquals(0, $res['repair_code']);
+        $this->assertEquals('consistent (both absent)', $res['action']);
+    }
+
+    /**
+     * 测试：monitor 对不存在的 SKU
+     */
+    public function testMonitorNotExists()
+    {
+        $res = $this->stockManager->monitor('GHOST_MONITOR');
+        $this->assertEquals(RedisStock::CODE_SUCCESS, $res['code']);
+        $this->assertFalse($res['exists']);
+        $this->assertEquals(0, $res['stock']);
+        $this->assertEquals(-2, $res['ttl']);
+        $this->assertFalse($res['is_sold_out']);
+        $this->assertTrue($res['consistency']); // 不存在但无标记，一致
     }
 }
