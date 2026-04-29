@@ -363,19 +363,4 @@ abstract class AbstractRedisManager
             ]);
         }
     }
-
-    /**
-     * 将金额字符串转换为分（整数）
-     * 优先使用 bcmath 扩展，若不可用则回退到原生计算
-     * 
-     * @param string $amountStr 金额字符串（如 "12.34"）
-     * @return int 金额（分）
-     */
-    protected function amountToCents(string $amountStr): int
-    {
-        if (function_exists('bcmul')) {
-            return (int)bcmul($amountStr, '100', 0);
-        }
-        return (int)round((float)$amountStr * 100);
-    }
 }

@@ -189,20 +189,21 @@ LUA
     }
 
     /**
-     * 添加销售记录
-     * @param string $sku
-     * @param string $userId
-     * @param int $quantity
-     * @param float $amount
-     * @param string $orderId
-     * @param int $limitPerUser
+     * 添加销售记录（不扣减库存）
+     *
+     * @param string $sku 商品SKU
+     * @param string $userId 用户ID
+     * @param int $quantity 购买数量
+     * @param int $amount 金额（单位：分）
+     * @param string $orderId 订单ID
+     * @param int $limitPerUser 限购数量，0表示无限制
      * @return array
      */
     public function recordPurchase(
         string $sku,
         string $userId,
         int    $quantity,
-        float  $amount,
+        int    $amount,        // 改为 int，单位：分
         string $orderId,
         int    $limitPerUser = 0
     ): array
@@ -210,17 +211,12 @@ LUA
         if ($quantity <= 0) {
             return ['code' => self::CODE_ERR_INVALID_QUANTITY, 'message' => '数量无效', 'total_sales' => null];
         }
-        if (!is_numeric($amount) || $amount < 0) {
+        if ($amount < 0) {
             return ['code' => self::CODE_ERR_INVALID_AMOUNT, 'message' => '金额无效', 'total_sales' => null];
         }
-        $amountStr = (string)$amount;
-        if (strpos($amountStr, '.') !== false) {
-            $decimalPart = substr(strrchr($amountStr, '.'), 1);
-            if (strlen($decimalPart) > 2) {
-                return ['code' => self::CODE_ERR_INVALID_AMOUNT, 'message' => '金额精度不能超过两位小数', 'total_sales' => null];
-            }
-        }
-        $amountInCents = $this->amountToCents($amountStr);
+
+        // 直接使用 $amount（分），无需转换
+        $amountInCents = $amount;
 
         // --- 集群兼容核心逻辑 ---
         // 我们利用商品 SKU 作为 Hash Tag。
@@ -314,13 +310,13 @@ LUA
     /**
      * 原子性扣减库存并记录销售（推荐用于秒杀场景）
      * 将库存扣减和销售记录放在同一个 Lua 脚本中，确保数据一致性
-     * 
-     * @param string $sku
-     * @param string $userId
-     * @param int $quantity
-     * @param float $amount
-     * @param string $orderId
-     * @param int $limitPerUser
+     *
+     * @param string $sku 商品SKU
+     * @param string $userId 用户ID
+     * @param int $quantity 购买数量
+     * @param float $amount 金额（单位：分）
+     * @param string $orderId 订单ID
+     * @param int $limitPerUser 限购数量，0表示无限制
      * @return array
      */
     public function recordPurchaseWithStock(
@@ -338,14 +334,7 @@ LUA
         if (!is_numeric($amount) || $amount < 0) {
             return ['code' => self::CODE_ERR_INVALID_AMOUNT, 'message' => '金额无效', 'remain' => null];
         }
-        $amountStr = (string)$amount;
-        if (strpos($amountStr, '.') !== false) {
-            $decimalPart = substr(strrchr($amountStr, '.'), 1);
-            if (strlen($decimalPart) > 2) {
-                return ['code' => self::CODE_ERR_INVALID_AMOUNT, 'message' => '金额精度不能超过两位小数', 'remain' => null];
-            }
-        }
-        $amountInCents = $this->amountToCents($amountStr);
+        $amountInCents = $amount;
 
         $tag = $this->keyPrefix;
 
@@ -468,9 +457,9 @@ LUA
     }
 
     /**
-     * 获取商品总销售额
+     * 获取商品总销售额（单位：分）
      * @param string $sku
-     * @return array ['code' => int, 'data' => float]
+     * @return array ['code' => int, 'data' => int] data 单位：分
      */
     public function getSalesAmount(string $sku): array
     {
@@ -479,9 +468,9 @@ LUA
             $val = $this->readWithRetry(function ($redis) use ($key) {
                 return $redis->get($key);
             });
-            return ['code' => self::CODE_SUCCESS, 'data' => $val === false ? 0.0 : (float)($val / 100)];
+            return ['code' => self::CODE_SUCCESS, 'data' => $val === false ? 0 : (int)$val];
         } catch (\RuntimeException $e) {
-            return ['code' => self::CODE_ERR_REDIS_UNAVAILABLE, 'data' => 0.0];
+            return ['code' => self::CODE_ERR_REDIS_UNAVAILABLE, 'data' => 0];
         }
     }
 
@@ -537,7 +526,7 @@ LUA
      * @param int $start
      * @param int $stop
      * @param bool $withScores
-     * @return array ['code' => int, 'data' => array]
+     * @return array ['code' => int, 'data' => array] 若 withScores=true，分数单位为分
      */
     public function getAmountLeaderboard(int $start = 0, int $stop = 9, bool $withScores = true): array
     {
@@ -546,6 +535,7 @@ LUA
             $data = $this->readWithRetry(function ($redis) use ($key, $start, $stop, $withScores) {
                 return $withScores ? $redis->zRevRange($key, $start, $stop, true) : $redis->zRevRange($key, $start, $stop);
             });
+            // 分数已经是分，直接返回，不再转换
             return ['code' => self::CODE_SUCCESS, 'data' => $data];
         } catch (\RuntimeException $e) {
             return ['code' => self::CODE_ERR_REDIS_UNAVAILABLE, 'data' => []];
