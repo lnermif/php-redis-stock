@@ -63,15 +63,38 @@ php examples/advanced_usage.php
 ### 5. seckill_demo.php - 秒杀场景完整演示
 一个完整的秒杀场景模拟，包括：
 - 活动前库存预热
-- 多用户并发抢购
+- 库存+销售原子操作
+- 多用户并发抢购（含限购控制）
+- 订单幂等性保护
 - 批量购买套装
 - 订单取消库存回滚
+- 销量/销售额排行榜
 - 性能统计
 - 自动清理测试数据
 
 **运行方式：**
 ```bash
 php examples/seckill_demo.php
+```
+
+---
+
+### 6. sales_usage.php - 销售记录使用示例
+展示 RedisSales 的完整功能：
+- 记录销售（不扣减库存）
+- 记录销售（原子扣减库存）
+- 限购控制
+- 订单幂等性
+- 用户购买记录查询
+- 销售统计
+- 销量/销售额排行榜
+- 订单状态检查
+- 数据清理
+- 错误处理
+
+**运行方式：**
+```bash
+php examples/sales_usage.php
 ```
 
 ---
@@ -109,6 +132,9 @@ php examples/advanced_usage.php
 
 # 秒杀演示
 php examples/seckill_demo.php
+
+# 销售记录
+php examples/sales_usage.php
 ```
 
 ---

@@ -2,10 +2,15 @@
 
 /**
  * RedisStock 高级用法示例
- * - 自定义日志
- * - 批量操作
- * - 多规格商品
- * - 性能优化
+ * 
+ * 功能：
+ * - 自定义日志器
+ * - 批量扣减库存（多规格商品）
+ * - 库存监控与自愈
+ * - 高并发重试机制
+ * - 库存预热
+ * - 库存告警
+ * - 性能测试
  */
 
 require_once __DIR__ . '/../vendor/autoload.php';
@@ -101,23 +106,67 @@ if ($result['success']) {
     echo "  需求数量: {$result['required']}\n";
     echo "  可用数量: {$result['available']}\n";
     echo "  错误码: {$result['code']}\n";
+    if (isset($result['message'])) {
+        echo "  错误信息: {$result['message']}\n";
+    }
 }
 
-// ========== 3. 高并发场景下的重试机制 ==========
+// ========== 3. 库存监控与自愈 ==========
+echo "\n=== 库存监控与自愈 ===\n";
+
+// 3.1 监控库存状态
+echo "--- 监控库存状态 ---\n";
+$monitorResult = $stockManager->monitor('IPHONE_15_BLACK_128G');
+echo "SKU: IPHONE_15_BLACK_128G\n";
+echo "  存在: " . ($monitorResult['exists'] ? '是' : '否') . "\n";
+echo "  库存: {$monitorResult['stock']}\n";
+echo "  TTL: {$monitorResult['ttl']}秒\n";
+echo "  售罄标记: " . ($monitorResult['is_sold_out'] ? '有' : '无') . "\n";
+echo "  一致性: " . ($monitorResult['consistency'] ? '一致' : '不一致') . "\n";
+
+// 3.2 模拟数据不一致（手动设置错误的售罄标记）
+echo "\n--- 模拟数据不一致 ---\n";
+$redis->set('{product:stock}:IPHONE_15_BLACK_128G:soldout', 1);
+$monitorResult = $stockManager->monitor('IPHONE_15_BLACK_128G');
+echo "监控发现不一致: " . ($monitorResult['consistency'] ? '一致' : '不一致') . "\n";
+
+// 3.3 自动修复
+echo "\n--- 自动修复 ---\n";
+$repairResult = $stockManager->repair('IPHONE_15_BLACK_128G');
+echo "修复结果:\n";
+echo "  成功: " . ($repairResult['success'] ? '是' : '否') . "\n";
+echo "  操作码: {$repairResult['repair_code']}\n";
+echo "  操作描述: {$repairResult['action']}\n";
+
+// 验证修复后状态
+$monitorResult = $stockManager->monitor('IPHONE_15_BLACK_128G');
+echo "修复后一致性: " . ($monitorResult['consistency'] ? '一致' : '不一致') . "\n";
+
+// ========== 4. 高并发场景下的重试机制 ==========
 echo "\n=== 高并发重试 ===\n";
 
 // 模拟高并发下的瞬态错误处理
 try {
     $result = $stockManager->decrStock('HOT_PRODUCT', 1);
-    echo "扣减成功，剩余: {$result['remain']}\n";
-} catch (\RuntimeException $e) {
-    if ($e->getCode() === RedisStock::CODE_ERR_REDIS_UNAVAILABLE) {
-        echo "Redis 服务不可用，请稍后重试\n";
-        // 可以加入队列异步处理
+    switch ($result['code']) {
+        case RedisStock::CODE_SUCCESS:
+            echo "扣减成功，剩余: {$result['remain']}\n";
+            break;
+        case RedisStock::CODE_ERR_INSUFFICIENT:
+            echo "库存不足，剩余: {$result['remain']}\n";
+            break;
+        case RedisStock::CODE_ERR_NOT_EXISTS:
+            echo "库存未初始化\n";
+            break;
+        case RedisStock::CODE_ERR_REDIS_UNAVAILABLE:
+            echo "Redis 服务不可用，请稍后重试\n";
+            break;
     }
+} catch (\RuntimeException $e) {
+    echo "系统异常: {$e->getMessage()}\n";
 }
 
-// ========== 4. 库存预热（活动开始前）==========
+// ========== 5. 库存预热（活动开始前）==========
 echo "\n=== 库存预热 ===\n";
 
 function preheatStock(RedisStock $manager, array $products, int $ttl = 3600): void
@@ -137,15 +186,19 @@ $products = [
 ];
 preheatStock($stockManager, $products, 7200);
 
-// ========== 5. 库存监控和告警 ==========
+// ========== 6. 库存监控和告警 ==========
 echo "\n=== 库存监控 ===\n";
 
 function checkLowStock(RedisStock $manager, array $skus, int $threshold = 10): array
 {
     $lowStockItems = [];
-    $stocks = $manager->getStocks($skus);
+    $stocksResult = $manager->getStocks($skus);
     
-    foreach ($stocks as $sku => $stock) {
+    if ($stocksResult['code'] !== RedisStock::CODE_SUCCESS) {
+        return $lowStockItems;
+    }
+    
+    foreach ($stocksResult['data'] as $sku => $stock) {
         if ($stock !== null && $stock <= $threshold) {
             $lowStockItems[] = [
                 'sku' => $sku,
@@ -169,7 +222,7 @@ if (!empty($lowStock)) {
     echo "✅ 所有商品库存充足\n";
 }
 
-// ========== 6. 性能测试 ==========
+// ========== 7. 性能测试 ==========
 echo "\n=== 性能测试 ===\n";
 
 $start = microtime(true);
@@ -184,3 +237,17 @@ $qps = $iterations / $elapsed;
 
 echo "执行 {$iterations} 次查询，耗时: " . round($elapsed, 3) . "秒\n";
 echo "QPS: " . round($qps, 2) . "\n";
+
+// ========== 8. 清理测试数据 ==========
+echo "\n=== 清理测试数据 ===\n";
+$cleanupSkus = [
+    'IPHONE_15_BLACK_128G',
+    'IPHONE_15_WHITE_128G',
+    'IPHONE_15_BLUE_256G',
+    'SECKILL_001',
+    'SECKILL_002',
+];
+foreach ($cleanupSkus as $sku) {
+    $stockManager->delStock($sku);
+}
+echo "清理完成\n";

@@ -6,13 +6,16 @@
  * 模拟高并发秒杀场景，包括：
  * - 库存预热
  * - 并发扣减
- * - 订单创建
+ * - 销售记录
+ * - 限购控制
+ * - 订单幂等
  * - 失败处理
  */
 
 require_once __DIR__ . '/../vendor/autoload.php';
 
 use Nermif\RedisStock;
+use Nermif\RedisSales;
 
 echo "========================================\n";
 echo "    秒杀场景演示\n";
@@ -30,8 +33,13 @@ echo "[2] 创建库存管理器...\n";
 $stockManager = new RedisStock($redis, '{seckill:product}:');
 echo "✓ 库存管理器创建成功\n\n";
 
-// ========== 3. 活动开始前 - 库存预热 ==========
-echo "[3] 活动开始前 - 库存预热...\n";
+// ========== 3. 创建销售管理器 ==========
+echo "[3] 创建销售管理器...\n";
+$salesManager = new RedisSales($redis, '{seckill:product}:');
+echo "✓ 销售管理器创建成功\n\n";
+
+// ========== 4. 活动开始前 - 库存预热 ==========
+echo "[4] 活动开始前 - 库存预热...\n";
 $seckillProducts = [
     'SECKILL_IPHONE_15' => 10,   // iPhone 15 只有 10 台
     'SECKILL_AIRPODS' => 50,     // AirPods 有 50 台
@@ -51,106 +59,58 @@ foreach ($seckillProducts as $sku => $stock) {
 }
 echo "\n";
 
-// ========== 4. 模拟用户抢购 ==========
-echo "[4] 模拟用户抢购...\n";
+// ========== 5. 模拟用户抢购（使用 recordPurchaseWithStock 原子操作） ==========
+echo "[5] 模拟用户抢购（库存+销售原子操作）...\n";
 
-function simulateSeckill(RedisStock $manager, string $userId, string $sku, int $quantity = 1): array
-{
-    // 步骤1: 快速检查是否售罄（轻量级查询）
-    if ($manager->isSoldOut($sku)) {
-        return [
-            'success' => false,
-            'message' => '商品已售罄',
-            'user_id' => $userId
-        ];
-    }
-
-    // 步骤2: 查询详细库存
-    $stockInfo = $manager->getStock($sku);
+function simulateSeckillWithSales(
+    RedisSales $salesManager,
+    string $userId,
+    string $sku,
+    int $quantity,
+    int $amount,
+    int $limitPerUser = 0
+): array {
+    $orderId = 'ORD' . date('YmdHis') . '_' . substr($userId, -4) . '_' . substr(md5($sku . time()), 0, 4);
     
-    if ($stockInfo['stock'] === null) {
-        return [
-            'success' => false,
-            'message' => '商品不存在',
-            'user_id' => $userId
-        ];
-    }
-
-    if ($stockInfo['stock'] < $quantity) {
-        return [
-            'success' => false,
-            'message' => "库存不足 (剩余: {$stockInfo['stock']})",
-            'user_id' => $userId
-        ];
-    }
-
-    // 步骤3: 原子扣减库存
-    try {
-        $result = $manager->decrStock($sku, $quantity);
-
-        switch ($result['code']) {
-            case RedisStock::CODE_SUCCESS:
-                // 步骤4: 创建订单（这里简化处理）
-                $orderId = generateOrderId($userId, $sku);
-                
-                return [
-                    'success' => true,
-                    'message' => '抢购成功',
-                    'user_id' => $userId,
-                    'order_id' => $orderId,
-                    'remain_stock' => $result['remain']
-                ];
-
-            case RedisStock::CODE_ERR_INSUFFICIENT:
-                return [
-                    'success' => false,
-                    'message' => "库存不足 (剩余: {$result['remain']})",
-                    'user_id' => $userId
-                ];
-
-            case RedisStock::CODE_ERR_NOT_EXISTS:
-                return [
-                    'success' => false,
-                    'message' => '商品不存在',
-                    'user_id' => $userId
-                ];
-
-            default:
-                return [
-                    'success' => false,
-                    'message' => '系统繁忙，请重试',
-                    'user_id' => $userId
-                ];
-        }
-    } catch (\RuntimeException $e) {
-        return [
-            'success' => false,
-            'message' => '系统异常',
-            'user_id' => $userId,
-            'error' => $e->getMessage()
-        ];
-    }
+    // 使用 recordPurchaseWithStock 原子扣减库存并记录销售
+    $result = $salesManager->recordPurchaseWithStock(
+        $sku,
+        $userId,
+        $quantity,
+        $amount,
+        $orderId,
+        $limitPerUser
+    );
+    
+    return [
+        'success' => $result['code'] === RedisSales::CODE_SUCCESS,
+        'code' => $result['code'],
+        'message' => $result['message'],
+        'user_id' => $userId,
+        'order_id' => $orderId,
+        'total_sales' => $result['total_sales'] ?? null,
+        'remain' => $result['remain'] ?? null,
+        'remaining_limit' => $result['remaining_limit'] ?? null,
+    ];
 }
 
-function generateOrderId(string $userId, string $sku): string
-{
-    return 'ORD' . date('YmdHis') . '_' . substr($userId, -4) . '_' . substr(md5($sku), 0, 4);
-}
-
-// 模拟多个用户抢购同一个商品
-echo "\n--- 场景1: 多用户抢购 iPhone 15 ---\n";
+// 模拟多个用户抢购同一个商品（限购 2 件）
+echo "\n--- 场景1: 多用户抢购 iPhone 15（限购 2 件） ---\n";
 $users = ['user_001', 'user_002', 'user_003', 'user_004', 'user_005'];
 $results = [];
 
 foreach ($users as $user) {
-    $result = simulateSeckill($stockManager, $user, 'SECKILL_IPHONE_15', 1);
+    // 每个用户尝试购买 1 件，价格 999900 分（9999 元）
+    $result = simulateSeckillWithSales($salesManager, $user, 'SECKILL_IPHONE_15', 1, 999900, 2);
     $results[] = $result;
     
     $status = $result['success'] ? '✓' : '✗';
     echo "{$status} {$user}: {$result['message']}\n";
     
     if ($result['success']) {
-        echo "   订单号: {$result['order_id']}, 剩余库存: {$result['remain_stock']}\n";
+        echo "   订单号: {$result['order_id']}, 总销量: {$result['total_sales']}\n";
+    } elseif ($result['remaining_limit'] !== null) {
+        echo "   剩余可购买: {$result['remaining_limit']} 件\n";
     }
     
     // 模拟网络延迟
@@ -160,17 +120,70 @@ foreach ($users as $user) {
 $successCount = count(array_filter($results, function($r) { return $r['success']; }));
 echo "\n结果: {$successCount}/" . count($users) . " 人抢购成功\n\n";
 
-// ========== 5. 查看库存状态 ==========
-echo "[5] 查看库存状态...\n";
+// ========== 6. 模拟用户重复提交（幂等性测试） ==========
+echo "[6] 模拟用户重复提交（幂等性测试）...\n";
+$userId = 'user_001';
+$orderId = 'ORD_DUPLICATE_TEST';
+
+// 第一次提交
+$result1 = $salesManager->recordPurchaseWithStock('SECKILL_AIRPODS', $userId, 1, 129900, $orderId, 0);
+echo "第一次提交: {$result1['message']}\n";
+
+// 第二次提交（相同订单号）
+$result2 = $salesManager->recordPurchaseWithStock('SECKILL_AIRPODS', $userId, 1, 129900, $orderId, 0);
+echo "第二次提交: {$result2['message']}\n";
+echo "✓ 幂等性保护生效\n\n";
+
+// ========== 7. 查看库存状态 ==========
+echo "[7] 查看库存状态...\n";
 foreach ($seckillProducts as $sku => $initialStock) {
     $stockInfo = $stockManager->getStock($sku);
     $soldOut = $stockInfo['soldOut'] ? ' (已售罄)' : '';
-    echo "  - {$sku}: {$stockInfo['stock']} 件{$soldOut}\n";
+    $stockStr = $stockInfo['stock'] === null ? '不存在' : $stockInfo['stock'];
+    echo "  - {$sku}: {$stockStr} 件{$soldOut}\n";
 }
 echo "\n";
 
-// ========== 6. 批量购买场景 ==========
-echo "[6] 批量购买场景 - 用户一次性购买多个商品...\n";
+// ========== 8. 查看销售统计 ==========
+echo "[8] 查看销售统计...\n";
+foreach ($seckillProducts as $sku => $initialStock) {
+    $salesCount = $salesManager->getSalesCount($sku);
+    $salesAmount = $salesManager->getSalesAmount($sku);
+    echo "  - {$sku}:\n";
+    echo "    销量: {$salesCount['data']} 件\n";
+    echo "    销售额: " . number_format($salesAmount['data'] / 100, 2) . " 元\n";
+}
+echo "\n";
+
+// ========== 9. 查看用户购买记录 ==========
+echo "[9] 查看用户购买记录...\n";
+$userPurchases = $salesManager->getUserPurchases('user_001');
+echo "user_001 购买记录:\n";
+foreach ($userPurchases['data'] as $sku => $count) {
+    echo "  - {$sku}: {$count} 件\n";
+}
+echo "\n";
+
+// ========== 10. 查看销量排行榜 ==========
+echo "[10] 查看销量排行榜...\n";
+$leaderboard = $salesManager->getSalesLeaderboard(0, 9, true);
+echo "销量排行榜（Top 10）:\n";
+foreach ($leaderboard['data'] as $sku => $count) {
+    echo "  {$sku}: {$count} 件\n";
+}
+echo "\n";
+
+// ========== 11. 查看销售额排行榜 ==========
+echo "[11] 查看销售额排行榜...\n";
+$amountLeaderboard = $salesManager->getAmountLeaderboard(0, 9, true);
+echo "销售额排行榜（Top 10）:\n";
+foreach ($amountLeaderboard['data'] as $sku => $amount) {
+    echo "  {$sku}: " . number_format($amount / 100, 2) . " 元\n";
+}
+echo "\n";
+
+// ========== 12. 批量购买场景 ==========
+echo "[12] 批量购买场景 - 用户一次性购买多个商品...\n";
 
 // 初始化测试库存
 $stockManager->initStocks([
@@ -208,8 +221,8 @@ try {
 }
 echo "\n";
 
-// ========== 7. 订单取消 - 库存回滚 ==========
-echo "[7] 订单取消 - 库存回滚...\n";
+// ========== 13. 订单取消 - 库存回滚 ==========
+echo "[13] 订单取消 - 库存回滚...\n";
 
 $stockInfo = $stockManager->getStock('SECKILL_AIRPODS');
 $beforeStock = $stockInfo['stock'];
@@ -227,8 +240,8 @@ if ($result['code'] === RedisStock::CODE_SUCCESS) {
 }
 echo "\n";
 
-// ========== 8. 性能统计 ==========
-echo "[8] 性能测试...\n";
+// ========== 14. 性能统计 ==========
+echo "[14] 性能测试...\n";
 
 $testSku = 'PERF_TEST_ITEM';
 $stockManager->initStocks([$testSku => 10000], 3600);
@@ -246,10 +259,11 @@ $qps = $ops / $elapsed;
 echo "执行 {$ops} 次查询，耗时: " . round($elapsed * 1000, 2) . " ms\n";
 echo "QPS: " . number_format($qps, 2) . "\n\n";
 
-// ========== 9. 清理测试数据 ==========
-echo "[9] 清理测试数据...\n";
+// ========== 15. 清理测试数据 ==========
+echo "[15] 清理测试数据...\n";
 foreach ($seckillProducts as $sku => $stock) {
     $stockManager->delStock($sku);
+    $salesManager->clearSalesData($sku);
 }
 $stockManager->delStock('BUNDLE_PHONE');
 $stockManager->delStock('BUNDLE_CASE');
