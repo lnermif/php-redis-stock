@@ -337,10 +337,10 @@ LUA
     /**
      * 根据错误码获取错误信息
      * @param int $code
-     * @param $extra
+     * @param int $extra
      * @return string
      */
-    private function getMessageByCode(int $code, $extra): string
+    private function getMessageByCode(int $code, int $extra = 0): string
     {
         switch ($code) {
             case self::CODE_SUCCESS:

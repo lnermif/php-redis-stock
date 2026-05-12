@@ -327,6 +327,11 @@ LUA,
         if (empty($skus)) {
             return ['code' => self::CODE_SUCCESS, 'data' => []];
         }
+        foreach ($skus as $sku) {
+            if (!$this->isValidId($sku)) {
+                return ['code' => self::CODE_ERR_INVALID_QUANTITY, 'data' => []];
+            }
+        }
         try {
             $keys = array_map(function ($sku) {
                 return $this->keyPrefix . $sku;

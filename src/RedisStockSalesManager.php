@@ -366,7 +366,7 @@ class RedisStockSalesManager implements StockSalesCodes
         $message = $res['action'] ?? '修复失败';
 
         return $this->response($code, $message, [
-            'repair_code' => $res['repair_code'] ?? null,
+            'repair_code' => $res['repair_code'] ?? -1,
         ]);
     }
 }
