@@ -103,7 +103,7 @@ abstract class AbstractRedisManager
                 ]);
             }
         }
-        
+
         if (!empty($failedScripts)) {
             throw new \RuntimeException(
                 'Failed to load Lua scripts: ' . implode(', ', $failedScripts) . '. Redis connection may be unavailable.',
@@ -125,7 +125,7 @@ abstract class AbstractRedisManager
             }
             return true;
         }
-        
+
         $transientPatterns = [
             'Connection refused',
             'Connection timed out',
@@ -138,13 +138,13 @@ abstract class AbstractRedisManager
             'MOVED',
             'ASK',
         ];
-        
+
         foreach ($transientPatterns as $pattern) {
             if (strpos($msg, $pattern) !== false) {
                 return true;
             }
         }
-        
+
         return false;
     }
 
@@ -219,7 +219,7 @@ abstract class AbstractRedisManager
     /**
      * 执行带重试的读操作
      * 适用于所有可能抛出 RedisException 的读命令（get、mget、exists 等）
-     * 
+     *
      * @param callable $operation 读操作闭包，接收 \Redis 实例作为参数
      * @param int|null $maxRetries 最大重试次数
      * @return mixed
@@ -264,7 +264,7 @@ abstract class AbstractRedisManager
     /**
      * 执行带重试的写操作
      * 适用于所有可能抛出 RedisException 的写命令（del、set、zRem 等）
-     * 
+     *
      * @param callable $operation 写操作闭包，接收 \Redis 实例作为参数
      * @param int|null $maxRetries 最大重试次数
      * @return mixed
@@ -309,7 +309,7 @@ abstract class AbstractRedisManager
     /**
      * 执行带重试的 Pipeline 操作
      * 适用于需要原子性执行的多个 Redis 命令
-     * 
+     *
      * @param callable $operation Pipeline 操作闭包，接收 \Redis 实例作为参数，需返回 $pipe->exec() 结果
      * @param int|null $maxRetries 最大重试次数
      * @return mixed

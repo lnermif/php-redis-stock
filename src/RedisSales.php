@@ -467,7 +467,8 @@ LUA
         int    $quantity,
         int    $amount,
         string $orderId
-    ): array {
+    ): array
+    {
         if ($quantity <= 0) {
             return ['code' => self::CODE_ERR_INVALID_QUANTITY, 'message' => '数量无效', 'remain' => null];
         }

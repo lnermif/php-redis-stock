@@ -27,17 +27,24 @@ class RedisStockSalesManager implements StockSalesCodes
     private $salesManager;
 
     /**
-     * @param \Redis           $redis      已连接的 Redis 实例
-     * @param string           $keyPrefix  Key 前缀，强烈建议包含 Hash Tag（如 "{product:stock}:"）
+     * @param \Redis $redis 已连接的 Redis 实例
+     * @param string $keyPrefix Key 前缀，强烈建议包含 Hash Tag（如 "{product:stock}:"）
      * @param LoggerInterface|null $logger PSR-3 日志记录器
-     * @param int|null         $maxRetries 最大重试次数，null 则使用默认值
+     * @param int|null $maxRetries 最大重试次数，null 则使用默认值
      */
     public function __construct(
         \Redis           $redis,
         string           $keyPrefix = '{product:stock}:',
         ?LoggerInterface $logger = null,
         ?int             $maxRetries = null
-    ) {
+    )
+    {
+        // 验证连接状态（兼容不同版本 PhpRedis）
+        try {
+            $redis->ping();
+        } catch (\RedisException $e) {
+            throw new \InvalidArgumentException('Redis 实例未连接或不可用：' . $e->getMessage());
+        }
         $this->stockManager = new RedisStock($redis, $keyPrefix, $logger, $maxRetries);
         $this->salesManager = new RedisSales($redis, $keyPrefix, $logger, $maxRetries);
     }
@@ -47,18 +54,18 @@ class RedisStockSalesManager implements StockSalesCodes
     /**
      * 构造统一返回结构
      *
-     * @param int        $code    业务状态码
-     * @param string     $message 描述信息
-     * @param mixed|null $data    业务数据
+     * @param int $code 业务状态码
+     * @param string $message 描述信息
+     * @param mixed|null $data 业务数据
      * @return array
      */
     private function response(int $code, string $message, $data = null): array
     {
         return [
             'success' => $code === self::CODE_SUCCESS,
-            'code'    => $code,
+            'code' => $code,
             'message' => $message,
-            'data'    => $data,
+            'data' => $data,
         ];
     }
 
@@ -67,12 +74,12 @@ class RedisStockSalesManager implements StockSalesCodes
     /**
      * 购买下单（原子扣减库存 + 记录销售数据）
      *
-     * @param string $sku          商品 SKU
-     * @param string $userId       用户 ID
-     * @param int    $quantity     购买数量
-     * @param int    $amount       金额（单位：分，如 1999 表示 19.99 元）
-     * @param string $orderId      订单 ID（幂等键）
-     * @param int    $limitPerUser 用户限购数量，0 表示不限购
+     * @param string $sku 商品 SKU
+     * @param string $userId 用户 ID
+     * @param int $quantity 购买数量
+     * @param int $amount 金额（单位：分，如 1999 表示 19.99 元）
+     * @param string $orderId 订单 ID（幂等键）
+     * @param int $limitPerUser 用户限购数量，0 表示不限购
      *
      * @return array [
      *   'success' => bool,
@@ -101,20 +108,29 @@ class RedisStockSalesManager implements StockSalesCodes
         int    $amount,
         string $orderId,
         int    $limitPerUser = 0
-    ): array {
+    ): array
+    {
+        // 参数快速失败校验
+        if ($orderId === '') {
+            return $this->response(self::CODE_ERR_INVALID_QUANTITY, '订单ID不能为空');
+        }
+        if ($limitPerUser < 0) {
+            return $this->response(self::CODE_ERR_INVALID_QUANTITY, '限购数量不能为负数');
+        }
+
         $result = $this->salesManager->recordPurchaseWithStock(
             $sku, $userId, $quantity, $amount, $orderId, $limitPerUser
         );
 
-        $code    = (int)($result['code'] ?? self::CODE_ERR_REDIS_UNAVAILABLE);
+        $code = (int)($result['code'] ?? self::CODE_ERR_REDIS_UNAVAILABLE);
         $message = (string)($result['message'] ?? '');
 
         $data = [
-            'sku'             => $sku,
-            'user_id'         => $userId,
-            'order_id'        => $orderId,
-            'total_sales'     => $result['total_sales'] ?? null,
-            'remain'          => $result['remain'] ?? null,
+            'sku' => $sku,
+            'user_id' => $userId,
+            'order_id' => $orderId,
+            'total_sales' => $result['total_sales'] ?? null,
+            'remain' => $result['remain'] ?? null,
             'remaining_limit' => $result['remaining_limit'] ?? null,
         ];
 
@@ -124,10 +140,10 @@ class RedisStockSalesManager implements StockSalesCodes
     /**
      * 取消订单（原子回滚库存 + 回退销售数据）
      *
-     * @param string $sku      商品 SKU
-     * @param int    $quantity 取消数量（需与下单数量一致）
-     * @param int    $amount   取消金额（单位：分，需与下单金额一致）
-     * @param string $orderId  订单 ID
+     * @param string $sku 商品 SKU
+     * @param int $quantity 取消数量（需与下单数量一致）
+     * @param int $amount 取消金额（单位：分，需与下单金额一致）
+     * @param string $orderId 订单 ID
      *
      * @return array [
      *   'success' => bool,
@@ -145,13 +161,13 @@ class RedisStockSalesManager implements StockSalesCodes
     public function cancel(string $sku, int $quantity, int $amount, string $orderId): array
     {
         $result = $this->salesManager->cancelOrderWithStock($sku, $quantity, $amount, $orderId);
-        $code    = (int)($result['code'] ?? self::CODE_ERR_REDIS_UNAVAILABLE);
+        $code = (int)($result['code'] ?? self::CODE_ERR_REDIS_UNAVAILABLE);
         $message = (string)($result['message'] ?? '');
 
         $data = [
-            'sku'      => $sku,
+            'sku' => $sku,
             'order_id' => $orderId,
-            'remain'   => $result['remain'] ?? null,
+            'remain' => $result['remain'] ?? null,
         ];
 
         return $this->response($code, $message, $data);
@@ -163,7 +179,7 @@ class RedisStockSalesManager implements StockSalesCodes
      * 批量初始化库存（幂等，已存在的 SKU 不会覆盖）
      *
      * @param array $stocks 关联数组，格式 ['sku' => 库存数量, ...]；数量必须 >= 0
-     * @param int   $ttl    库存过期时间（秒），0 表示永不过期，上限由 RedisConstants::MAX_TTL 控制
+     * @param int $ttl 库存过期时间（秒），0 表示永不过期，上限由 RedisConstants::MAX_TTL 控制
      *
      * @return array [
      *   'success' => bool,
@@ -177,16 +193,20 @@ class RedisStockSalesManager implements StockSalesCodes
         try {
             $count = $this->stockManager->initStocks($stocks, $ttl);
             return $this->response(self::CODE_SUCCESS, '初始化成功', ['initialized_count' => $count]);
+        } catch (\InvalidArgumentException $e) {
+            // 参数不合法（如 TTL < 0、库存为负值等）
+            return $this->response(self::CODE_ERR_INVALID_QUANTITY, $e->getMessage());
         } catch (\Exception $e) {
-            return $this->response(self::CODE_ERR_REDIS_UNAVAILABLE, $e->getMessage());
+            // Redis 不可用、脚本加载失败等运行时错误
+            return $this->response(self::CODE_ERR_REDIS_UNAVAILABLE, '初始化失败：' . $e->getMessage());
         }
     }
 
     /**
      * 增加库存（补货/退款场景）
      *
-     * @param string $sku      商品 SKU
-     * @param int    $quantity 增加数量（> 0）
+     * @param string $sku 商品 SKU
+     * @param int $quantity 增加数量（> 0）
      *
      * @return array [
      *   'success' => bool,
@@ -197,8 +217,8 @@ class RedisStockSalesManager implements StockSalesCodes
      */
     public function addStock(string $sku, int $quantity): array
     {
-        $res     = $this->stockManager->incrStock($sku, $quantity);
-        $code    = $res['code'] ?? self::CODE_ERR_REDIS_UNAVAILABLE;
+        $res = $this->stockManager->incrStock($sku, $quantity);
+        $code = $res['code'] ?? self::CODE_ERR_REDIS_UNAVAILABLE;
         $message = ($code === self::CODE_SUCCESS) ? '增加库存成功' : '增加库存失败';
 
         return $this->response($code, $message, [
@@ -223,12 +243,12 @@ class RedisStockSalesManager implements StockSalesCodes
      */
     public function getStock(string $sku): array
     {
-        $res     = $this->stockManager->getStock($sku);
-        $code    = $res['code'] ?? self::CODE_ERR_REDIS_UNAVAILABLE;
+        $res = $this->stockManager->getStock($sku);
+        $code = $res['code'] ?? self::CODE_ERR_REDIS_UNAVAILABLE;
         $message = ($code === self::CODE_SUCCESS) ? 'OK' : '查询失败';
 
         return $this->response($code, $message, [
-            'stock'   => $res['stock'] ?? null,
+            'stock' => $res['stock'] ?? null,
             'soldOut' => $res['soldOut'] ?? false,
         ]);
     }
@@ -247,8 +267,8 @@ class RedisStockSalesManager implements StockSalesCodes
      */
     public function isSoldOut(string $sku): array
     {
-        $res     = $this->stockManager->isSoldOut($sku);
-        $code    = $res['code'] ?? self::CODE_ERR_REDIS_UNAVAILABLE;
+        $res = $this->stockManager->isSoldOut($sku);
+        $code = $res['code'] ?? self::CODE_ERR_REDIS_UNAVAILABLE;
         $message = ($code === self::CODE_SUCCESS) ? 'OK' : '查询失败';
 
         return $this->response($code, $message, [
@@ -276,14 +296,14 @@ class RedisStockSalesManager implements StockSalesCodes
      */
     public function monitor(string $sku): array
     {
-        $res     = $this->stockManager->monitor($sku);
-        $code    = $res['code'] ?? self::CODE_ERR_REDIS_UNAVAILABLE;
+        $res = $this->stockManager->monitor($sku);
+        $code = $res['code'] ?? self::CODE_ERR_REDIS_UNAVAILABLE;
         $message = ($code === self::CODE_SUCCESS) ? 'OK' : '监控失败';
 
         return $this->response($code, $message, [
-            'exists'      => $res['exists'] ?? false,
-            'stock'       => $res['stock'] ?? 0,
-            'ttl'         => $res['ttl'] ?? -2,
+            'exists' => $res['exists'] ?? false,
+            'stock' => $res['stock'] ?? 0,
+            'ttl' => $res['ttl'] ?? -2,
             'is_sold_out' => $res['is_sold_out'] ?? false,
             'consistency' => $res['consistency'] ?? false,
         ]);
@@ -310,8 +330,8 @@ class RedisStockSalesManager implements StockSalesCodes
      */
     public function repair(string $sku): array
     {
-        $res     = $this->stockManager->repair($sku);
-        $code    = $res['code'] ?? self::CODE_ERR_REDIS_UNAVAILABLE;
+        $res = $this->stockManager->repair($sku);
+        $code = $res['code'] ?? self::CODE_ERR_REDIS_UNAVAILABLE;
         $message = $res['action'] ?? '修复失败';
 
         return $this->response($code, $message, [

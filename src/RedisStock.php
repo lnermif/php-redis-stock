@@ -293,7 +293,7 @@ LUA,
 
             $stockRaw = $results[0];
             $soldOutRaw = $results[1] ?? 0;
-            
+
             $stock = ($stockRaw === false || $stockRaw === null) ? null : (int)$stockRaw;
             $soldOut = ($soldOutRaw === false || $soldOutRaw === null) ? false : (bool)$soldOutRaw;
             return ['code' => self::CODE_SUCCESS, 'stock' => $stock, 'soldOut' => $soldOut];
@@ -486,10 +486,10 @@ LUA,
         $skuList = array_keys($items);
         $keys = [];
         $args = [];
-        
+
         $args[] = self::CODE_ERR_NOT_EXISTS;
         $args[] = self::CODE_ERR_INSUFFICIENT;
-        
+
         foreach ($skuList as $sku) {
             $keys[] = $this->getStockKey($sku);
             $args[] = (int)$items[$sku];
