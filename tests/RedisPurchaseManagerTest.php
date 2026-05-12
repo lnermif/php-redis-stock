@@ -2,7 +2,7 @@
 
 namespace Nermif\Tests;
 
-use Nermif\RedisPurchaseManager;
+use Nermif\RedisStockSalesManager;
 use PHPUnit\Framework\TestCase;
 use Redis;
 
@@ -11,7 +11,7 @@ class RedisPurchaseManagerTest extends TestCase
     /** @var Redis */
     private $redis;
 
-    /** @var RedisPurchaseManager */
+    /** @var RedisStockSalesManager */
     private $manager;
 
     private $testPrefix = '{test:purchase}:';
@@ -22,7 +22,7 @@ class RedisPurchaseManagerTest extends TestCase
         $this->redis->connect('127.0.0.1', 6379);
         $this->redis->select(15);
 
-        $this->manager = new RedisPurchaseManager($this->redis, $this->testPrefix);
+        $this->manager = new RedisStockSalesManager($this->redis, $this->testPrefix);
         $this->cleanup();
     }
 
@@ -46,7 +46,7 @@ class RedisPurchaseManagerTest extends TestCase
 
         $res = $this->manager->purchase('SKU_P1', 'USER_P1', 1, 1990, 'ORDER_P1', 0);
         $this->assertTrue($res['success']);
-        $this->assertEquals(RedisPurchaseManager::CODE_SUCCESS, $res['code']);
+        $this->assertEquals(RedisStockSalesManager::CODE_SUCCESS, $res['code']);
         $this->assertEquals('SKU_P1', $res['sku']);
         $this->assertEquals('ORDER_P1', $res['order_id']);
         $this->assertEquals(1, $res['total_sales']);
@@ -62,11 +62,11 @@ class RedisPurchaseManagerTest extends TestCase
         $this->manager->initStocks(['SKU_IDEM' => 10], 3600);
 
         $first = $this->manager->purchase('SKU_IDEM', 'USER_IDEM', 2, 1000, 'ORDER_IDEM', 0);
-        $this->assertEquals(RedisPurchaseManager::CODE_SUCCESS, $first['code']);
+        $this->assertEquals(RedisStockSalesManager::CODE_SUCCESS, $first['code']);
 
         $second = $this->manager->purchase('SKU_IDEM', 'USER_IDEM', 2, 1000, 'ORDER_IDEM', 0);
         $this->assertFalse($second['success']);
-        $this->assertEquals(RedisPurchaseManager::CODE_ERR_ALREADY_PROCESSED, $second['code']);
+        $this->assertEquals(RedisStockSalesManager::CODE_ERR_ALREADY_PROCESSED, $second['code']);
         $this->assertNull($second['total_sales']);
         $this->assertNull($second['remain']);
     }
@@ -77,7 +77,7 @@ class RedisPurchaseManagerTest extends TestCase
 
         $res = $this->manager->purchase('SKU_LOW', 'USER_LOW', 5, 1000, 'ORDER_LOW', 0);
         $this->assertFalse($res['success']);
-        $this->assertEquals(RedisPurchaseManager::CODE_ERR_INSUFFICIENT, $res['code']);
+        $this->assertEquals(RedisStockSalesManager::CODE_ERR_INSUFFICIENT, $res['code']);
         $this->assertEquals(2, $res['remain']);
     }
 
@@ -86,11 +86,11 @@ class RedisPurchaseManagerTest extends TestCase
         $this->manager->initStocks(['SKU_LIMIT' => 100], 3600);
 
         $r1 = $this->manager->purchase('SKU_LIMIT', 'USER_LIMIT', 2, 1000, 'ORDER_L1', 3);
-        $this->assertEquals(RedisPurchaseManager::CODE_SUCCESS, $r1['code']);
+        $this->assertEquals(RedisStockSalesManager::CODE_SUCCESS, $r1['code']);
 
         $r2 = $this->manager->purchase('SKU_LIMIT', 'USER_LIMIT', 2, 1000, 'ORDER_L2', 3);
         $this->assertFalse($r2['success']);
-        $this->assertEquals(RedisPurchaseManager::CODE_ERR_LIMIT_EXCEEDED, $r2['code']);
+        $this->assertEquals(RedisStockSalesManager::CODE_ERR_LIMIT_EXCEEDED, $r2['code']);
         $this->assertEquals(1, $r2['remaining_limit']); // 已购2，限购3，剩余1
     }
 
@@ -106,7 +106,7 @@ class RedisPurchaseManagerTest extends TestCase
 
         $cancel = $this->manager->cancelOrder('SKU_CAN', 1, 1990, 'ORDER_CAN');
         $this->assertTrue($cancel['success']);
-        $this->assertEquals(RedisPurchaseManager::CODE_SUCCESS, $cancel['code']);
+        $this->assertEquals(RedisStockSalesManager::CODE_SUCCESS, $cancel['code']);
         $this->assertEquals(2, $cancel['remain']);
 
         $stock2 = $this->manager->getStock('SKU_CAN');
@@ -128,7 +128,7 @@ class RedisPurchaseManagerTest extends TestCase
         // 再次取消：应当幂等，不重复回滚
         $cancel2 = $this->manager->cancelOrder('SKU_CAN2', 1, 1990, 'ORDER_CAN2');
         $this->assertFalse($cancel2['success']);
-        $this->assertEquals(RedisPurchaseManager::CODE_ERR_ORDER_CANCELED, $cancel2['code']);
+        $this->assertEquals(RedisStockSalesManager::CODE_ERR_ORDER_CANCELED, $cancel2['code']);
 
         $stock2 = $this->manager->getStock('SKU_CAN2');
         $this->assertEquals(2, $stock2['stock']);
@@ -136,7 +136,7 @@ class RedisPurchaseManagerTest extends TestCase
         // 取消后同一个 orderId 的重试扣减，应被拦截
         $purchase2 = $this->manager->purchase('SKU_CAN2', 'USER_CAN2', 1, 1990, 'ORDER_CAN2', 0);
         $this->assertFalse($purchase2['success']);
-        $this->assertEquals(RedisPurchaseManager::CODE_ERR_ORDER_CANCELED, $purchase2['code']);
+        $this->assertEquals(RedisStockSalesManager::CODE_ERR_ORDER_CANCELED, $purchase2['code']);
 
         $stock3 = $this->manager->getStock('SKU_CAN2');
         $this->assertEquals(2, $stock3['stock']);
@@ -158,7 +158,7 @@ class RedisPurchaseManagerTest extends TestCase
     public function testIsSoldOutNotExists(): void
     {
         $res = $this->manager->isSoldOut('SKU_GHOST');
-        $this->assertEquals(RedisPurchaseManager::CODE_SUCCESS, $res['code']);
+        $this->assertEquals(RedisStockSalesManager::CODE_SUCCESS, $res['code']);
         $this->assertFalse($res['soldOut']);
     }
 
@@ -167,7 +167,7 @@ class RedisPurchaseManagerTest extends TestCase
         $this->manager->initStocks(['SKU_MON' => 10], 3600);
         $res = $this->manager->monitor('SKU_MON');
 
-        $this->assertEquals(RedisPurchaseManager::CODE_SUCCESS, $res['code']);
+        $this->assertEquals(RedisStockSalesManager::CODE_SUCCESS, $res['code']);
         $this->assertTrue($res['exists']);
         $this->assertEquals(10, $res['stock']);
         $this->assertGreaterThan(0, $res['ttl']);
@@ -178,7 +178,7 @@ class RedisPurchaseManagerTest extends TestCase
     public function testMonitorNotExists(): void
     {
         $res = $this->manager->monitor('SKU_GHOST');
-        $this->assertEquals(RedisPurchaseManager::CODE_SUCCESS, $res['code']);
+        $this->assertEquals(RedisStockSalesManager::CODE_SUCCESS, $res['code']);
         $this->assertFalse($res['exists']);
         $this->assertEquals(0, $res['stock']);
         $this->assertEquals(-2, $res['ttl']);
@@ -191,7 +191,7 @@ class RedisPurchaseManagerTest extends TestCase
         $this->manager->initStocks(['SKU_REP' => 10], 3600);
         $res = $this->manager->repair('SKU_REP');
 
-        $this->assertEquals(RedisPurchaseManager::CODE_SUCCESS, $res['code']);
+        $this->assertEquals(RedisStockSalesManager::CODE_SUCCESS, $res['code']);
         $this->assertTrue($res['success']);
         $this->assertEquals(3, $res['repair_code']); // consistent
     }
@@ -203,7 +203,7 @@ class RedisPurchaseManagerTest extends TestCase
         $this->redis->set('{test:purchase}:SKU_REP2:soldout', 1);
 
         $res = $this->manager->repair('SKU_REP2');
-        $this->assertEquals(RedisPurchaseManager::CODE_SUCCESS, $res['code']);
+        $this->assertEquals(RedisStockSalesManager::CODE_SUCCESS, $res['code']);
         $this->assertTrue($res['success']);
         $this->assertEquals(1, $res['repair_code']); // removed invalid soldout marker
     }
@@ -211,7 +211,7 @@ class RedisPurchaseManagerTest extends TestCase
     public function testRepairNotExists(): void
     {
         $res = $this->manager->repair('SKU_GHOST');
-        $this->assertEquals(RedisPurchaseManager::CODE_SUCCESS, $res['code']);
+        $this->assertEquals(RedisStockSalesManager::CODE_SUCCESS, $res['code']);
         $this->assertTrue($res['success']);
         $this->assertEquals(0, $res['repair_code']); // both absent
     }
@@ -221,7 +221,7 @@ class RedisPurchaseManagerTest extends TestCase
         $this->manager->initStocks(['SKU_INCR' => 5], 3600);
         $res = $this->manager->incrStock('SKU_INCR', 3);
 
-        $this->assertEquals(RedisPurchaseManager::CODE_SUCCESS, $res['code']);
+        $this->assertEquals(RedisStockSalesManager::CODE_SUCCESS, $res['code']);
         $this->assertEquals(8, $res['remain']);
 
         $stock = $this->manager->getStock('SKU_INCR');
@@ -231,7 +231,7 @@ class RedisPurchaseManagerTest extends TestCase
     public function testIncrStockNotExists(): void
     {
         $res = $this->manager->incrStock('SKU_GHOST', 5);
-        $this->assertEquals(RedisPurchaseManager::CODE_ERR_NOT_EXISTS, $res['code']);
+        $this->assertEquals(RedisStockSalesManager::CODE_ERR_NOT_EXISTS, $res['code']);
         $this->assertNull($res['remain']);
     }
 
@@ -239,7 +239,7 @@ class RedisPurchaseManagerTest extends TestCase
     {
         $res = $this->manager->purchase('SKU_GHOST', 'USER_GHOST', 1, 1000, 'ORDER_GHOST', 0);
         $this->assertFalse($res['success']);
-        $this->assertEquals(RedisPurchaseManager::CODE_ERR_NOT_EXISTS, $res['code']);
+        $this->assertEquals(RedisStockSalesManager::CODE_ERR_NOT_EXISTS, $res['code']);
     }
 
     public function testPurchaseInvalidQuantity(): void
@@ -248,11 +248,11 @@ class RedisPurchaseManagerTest extends TestCase
 
         $res = $this->manager->purchase('SKU_INV', 'USER_INV', 0, 1000, 'ORDER_INV_QTY', 0);
         $this->assertFalse($res['success']);
-        $this->assertEquals(RedisPurchaseManager::CODE_ERR_INVALID_QUANTITY, $res['code']);
+        $this->assertEquals(RedisStockSalesManager::CODE_ERR_INVALID_QUANTITY, $res['code']);
 
         $res2 = $this->manager->purchase('SKU_INV', 'USER_INV', -1, 1000, 'ORDER_INV_QTY2', 0);
         $this->assertFalse($res2['success']);
-        $this->assertEquals(RedisPurchaseManager::CODE_ERR_INVALID_QUANTITY, $res2['code']);
+        $this->assertEquals(RedisStockSalesManager::CODE_ERR_INVALID_QUANTITY, $res2['code']);
     }
 
     public function testPurchaseInvalidAmount(): void
@@ -261,20 +261,20 @@ class RedisPurchaseManagerTest extends TestCase
 
         $res = $this->manager->purchase('SKU_INV_AMT', 'USER_INV_AMT', 1, -100, 'ORDER_INV_AMT', 0);
         $this->assertFalse($res['success']);
-        $this->assertEquals(RedisPurchaseManager::CODE_ERR_INVALID_AMOUNT, $res['code']);
+        $this->assertEquals(RedisStockSalesManager::CODE_ERR_INVALID_AMOUNT, $res['code']);
     }
 
     public function testCancelOrderNotProcessed(): void
     {
         $res = $this->manager->cancelOrder('SKU_GHOST', 1, 1000, 'ORDER_GHOST_CAN');
         $this->assertFalse($res['success']);
-        $this->assertEquals(RedisPurchaseManager::CODE_ERR_ORDER_NOT_PROCESSED, $res['code']);
+        $this->assertEquals(RedisStockSalesManager::CODE_ERR_ORDER_NOT_PROCESSED, $res['code']);
     }
 
     public function testGetStockNotExists(): void
     {
         $res = $this->manager->getStock('SKU_GHOST');
-        $this->assertEquals(RedisPurchaseManager::CODE_SUCCESS, $res['code']);
+        $this->assertEquals(RedisStockSalesManager::CODE_SUCCESS, $res['code']);
         $this->assertNull($res['stock']);
         $this->assertFalse($res['soldOut']);
     }

@@ -20,18 +20,8 @@ use Psr\Log\NullLogger;
  *   - 所有写操作均通过 Redis Lua 脚本原子执行
  *   - 使用 Hash Tag（如 {seckill:stock}:）确保集群模式下 Key 落在同一 Slot
  */
-class RedisStock extends AbstractRedisManager
+class RedisStock extends AbstractRedisManager implements StockSalesCodes
 {
-    // -------------------------------------------------------------------------
-    // 返回码常量（业务层可根据这些常量判断操作结果）
-    // -------------------------------------------------------------------------
-    public const CODE_SUCCESS = RedisConstants::CODE_SUCCESS;
-    public const CODE_ERR_INSUFFICIENT = RedisConstants::CODE_ERR_INSUFFICIENT;   // 库存不足
-    public const CODE_ERR_NOT_EXISTS = RedisConstants::CODE_ERR_NOT_EXISTS;   // 库存未初始化
-    public const CODE_ERR_INVALID_QUANTITY = RedisConstants::CODE_ERR_INVALID_QUANTITY;   // 数量非法（≤0）
-    public const CODE_ERR_REDIS_UNAVAILABLE = RedisConstants::CODE_ERR_REDIS_UNAVAILABLE;  // Redis 不可用
-
-
     /**
      * 定义 Lua 脚本模板
      * 注意：为了保持降级时的兼容性，内部不使用 PHP 变量，
