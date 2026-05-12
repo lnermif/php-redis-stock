@@ -8,6 +8,8 @@ use Psr\Log\NullLogger;
 
 abstract class AbstractRedisManager
 {
+    use IdSanitizer;
+
     /**
      * @var \Redis
      */

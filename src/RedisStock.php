@@ -249,6 +249,9 @@ LUA,
         $keys = [];
         $args = [];
         foreach ($stocks as $sku => $stock) {
+            if (!$this->isValidId($sku)) {
+                throw new \InvalidArgumentException("Invalid SKU: {$sku}");
+            }
             if (!is_numeric($stock)) {
                 throw new \InvalidArgumentException("Stock for SKU {$sku} must be a numeric value");
             }
@@ -280,6 +283,9 @@ LUA,
         $soldOutKey = $stockKey . RedisConstants::SOLD_OUT_SUFFIX;
 
         try {
+            if (!$this->isValidId($sku)) {
+                return ['code' => self::CODE_ERR_INVALID_QUANTITY, 'stock' => null, 'soldOut' => false];
+            }
             $results = $this->readWithRetry(function ($redis) use ($stockKey, $soldOutKey) {
                 $pipe = $redis->multi(\Redis::PIPELINE);
                 $pipe->get($stockKey);
@@ -350,6 +356,9 @@ LUA,
     public function isSoldOut(string $sku): array
     {
         try {
+            if (!$this->isValidId($sku)) {
+                return ['code' => self::CODE_ERR_INVALID_QUANTITY, 'soldOut' => false];
+            }
             $soldOutKey = $this->getSoldOutKey($sku);
             $result = $this->readWithRetry(function ($redis) use ($soldOutKey) {
                 return $redis->exists($soldOutKey);
@@ -372,6 +381,9 @@ LUA,
      */
     public function decrStock(string $sku, int $quantity): array
     {
+        if (!$this->isValidId($sku)) {
+            return ['code' => self::CODE_ERR_INVALID_QUANTITY, 'remain' => null];
+        }
         if ($quantity <= 0) {
             return [
                 'code' => self::CODE_ERR_INVALID_QUANTITY,
@@ -415,6 +427,9 @@ LUA,
      */
     public function incrStock(string $sku, int $quantity): array
     {
+        if (!$this->isValidId($sku)) {
+            return ['code' => self::CODE_ERR_INVALID_QUANTITY, 'remain' => null];
+        }
         if ($quantity <= 0) {
             return [
                 'code' => self::CODE_ERR_INVALID_QUANTITY,
@@ -465,6 +480,14 @@ LUA,
         }
 
         foreach ($items as $sku => $quantity) {
+            if (!$this->isValidId($sku)) {
+                return [
+                    'success' => false,
+                    'code' => self::CODE_ERR_INVALID_QUANTITY,
+                    'sku' => $sku,
+                    'message' => "Invalid SKU: {$sku}"
+                ];
+            }
             if (!is_numeric($quantity)) {
                 return [
                     'success' => false,
@@ -543,6 +566,9 @@ LUA,
     public function delStock(string $sku): array
     {
         try {
+            if (!$this->isValidId($sku)) {
+                return ['code' => self::CODE_ERR_INVALID_QUANTITY, 'deleted' => 0];
+            }
             $keys = [$this->getStockKey($sku), $this->getSoldOutKey($sku)];
             $deleted = $this->writeWithRetry(function ($redis) use ($keys) {
                 return $redis->del($keys);
@@ -566,6 +592,13 @@ LUA,
         $soldOutKey = $this->getSoldOutKey($sku);
 
         try {
+            if (!$this->isValidId($sku)) {
+                return [
+                    'code' => self::CODE_ERR_INVALID_QUANTITY,
+                    'exists' => false, 'stock' => 0, 'ttl' => -2,
+                    'is_sold_out' => false, 'consistency' => false
+                ];
+            }
             $res = $this->pipelineWithRetry(function ($redis) use ($stockKey, $soldOutKey) {
                 $pipe = $redis->multi(\Redis::PIPELINE);
                 $pipe->get($stockKey);
@@ -629,6 +662,13 @@ LUA,
         $keys = [$this->getStockKey($sku), $this->getSoldOutKey($sku)];
 
         try {
+            if (!$this->isValidId($sku)) {
+                return [
+                    'code' => self::CODE_ERR_INVALID_QUANTITY,
+                    'success' => false,
+                    'action' => 'invalid SKU'
+                ];
+            }
             $res = (int)$this->execLuaWithRetry('repair', $keys, []);
 
             $actions = [

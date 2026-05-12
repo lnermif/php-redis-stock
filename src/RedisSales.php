@@ -260,6 +260,9 @@ LUA
         int    $limitPerUser = 0
     ): array
     {
+        if (!$this->isValidId($sku) || !$this->isValidId($userId)) {
+            return ['code' => self::CODE_ERR_INVALID_QUANTITY, 'message' => '参数包含非法字符', 'total_sales' => null];
+        }
         if ($quantity <= 0) {
             return ['code' => self::CODE_ERR_INVALID_QUANTITY, 'message' => '数量无效', 'total_sales' => null];
         }
@@ -383,6 +386,9 @@ LUA
         int    $limitPerUser = 0
     ): array
     {
+        if (!$this->isValidId($sku) || !$this->isValidId($userId)) {
+            return ['code' => self::CODE_ERR_INVALID_QUANTITY, 'message' => '参数包含非法字符', 'total_sales' => null];
+        }
         if ($quantity <= 0) {
             return ['code' => self::CODE_ERR_INVALID_QUANTITY, 'message' => '数量无效', 'remain' => null];
         }
@@ -469,6 +475,9 @@ LUA
         string $orderId
     ): array
     {
+        if (!$this->isValidId($sku)) {
+            return ['code' => self::CODE_ERR_INVALID_QUANTITY, 'message' => 'SKU包含非法字符', 'remain' => null];
+        }
         if ($quantity <= 0) {
             return ['code' => self::CODE_ERR_INVALID_QUANTITY, 'message' => '数量无效', 'remain' => null];
         }
@@ -535,6 +544,9 @@ LUA
     public function getUserPurchases(string $userId): array
     {
         try {
+            if (!$this->isValidId($userId)) {
+                return ['code' => self::CODE_ERR_INVALID_QUANTITY, 'data' => []];
+            }
             $userSetKey = $this->keyPrefix . RedisConstants::USER_PURCHASED_SET_PREFIX . $userId . ':purchased';
             $skus = $this->readWithRetry(function ($redis) use ($userSetKey) {
                 return $redis->sMembers($userSetKey);
@@ -579,6 +591,9 @@ LUA
     public function getSalesCount(string $sku): array
     {
         try {
+            if (!$this->isValidId($sku)) {
+                return ['code' => self::CODE_ERR_INVALID_QUANTITY, 'data' => 0];
+            }
             $key = $this->keyPrefix . $sku . RedisConstants::SALES_COUNT_SUFFIX;
             $val = $this->readWithRetry(function ($redis) use ($key) {
                 return $redis->get($key);
@@ -597,6 +612,9 @@ LUA
     public function getSalesAmount(string $sku): array
     {
         try {
+            if (!$this->isValidId($sku)) {
+                return ['code' => self::CODE_ERR_INVALID_QUANTITY, 'data' => 0];
+            }
             $key = $this->keyPrefix . $sku . RedisConstants::SALES_AMOUNT_SUFFIX;
             $val = $this->readWithRetry(function ($redis) use ($key) {
                 return $redis->get($key);
@@ -618,6 +636,11 @@ LUA
             return ['code' => self::CODE_SUCCESS, 'data' => []];
         }
         try {
+            foreach ($skus as $sku) {
+                if (!$this->isValidId($sku)) {
+                    return ['code' => self::CODE_ERR_INVALID_QUANTITY, 'data' => []];
+                }
+            }
             $keys = array_map(function ($sku) {
                 return $this->keyPrefix . $sku . RedisConstants::SALES_COUNT_SUFFIX;
             }, $skus);
@@ -702,6 +725,9 @@ LUA
     public function getUserPurchaseCount(string $sku, string $userId): array
     {
         try {
+            if (!$this->isValidId($sku) || !$this->isValidId($userId)) {
+                return ['code' => self::CODE_ERR_INVALID_QUANTITY, 'data' => 0];
+            }
             $hashKey = $this->keyPrefix . $sku . RedisConstants::USER_BOUGHT_HASH_SUFFIX;
             $count = $this->readWithRetry(function ($redis) use ($hashKey, $userId) {
                 return $redis->hGet($hashKey, $userId);
@@ -721,6 +747,9 @@ LUA
      */
     public function getRemainingLimit(string $sku, string $userId, int $limit): array
     {
+        if (!$this->isValidId($sku) || !$this->isValidId($userId)) {
+            return ['code' => self::CODE_ERR_INVALID_QUANTITY, 'data' => 0];
+        }
         if ($limit <= 0) {
             return ['code' => self::CODE_SUCCESS, 'data' => PHP_INT_MAX];
         }
@@ -740,6 +769,9 @@ LUA
     public function clearSalesData(string $sku): array
     {
         try {
+            if (!$this->isValidId($sku)) {
+                return ['code' => self::CODE_ERR_INVALID_QUANTITY, 'deleted' => 0];
+            }
             $keysToDelete = [
                 $this->keyPrefix . $sku . RedisConstants::USER_BOUGHT_HASH_SUFFIX,
                 $this->keyPrefix . $sku . RedisConstants::SALES_COUNT_SUFFIX,
