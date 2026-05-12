@@ -15,6 +15,8 @@ class RedisSales extends AbstractRedisManager
     public const CODE_ERR_INVALID_AMOUNT = RedisConstants::CODE_ERR_INVALID_AMOUNT;
     public const CODE_ERR_INSUFFICIENT = RedisConstants::CODE_ERR_INSUFFICIENT;
     public const CODE_ERR_NOT_EXISTS = RedisConstants::CODE_ERR_NOT_EXISTS;
+    public const CODE_ERR_ORDER_CANCELED = RedisConstants::CODE_ERR_ORDER_CANCELED;
+    public const CODE_ERR_ORDER_NOT_PROCESSED = RedisConstants::CODE_ERR_ORDER_NOT_PROCESSED;
 
     /**
      * 定义 Lua 脚本模板
@@ -87,6 +89,7 @@ LUA,
         local sales_amount_key = KEYS[7]
         local leaderboard_count_key = KEYS[8]
         local leaderboard_amount_key = KEYS[9]
+        local cancel_key = KEYS[10]
         
         local user_id = ARGV[1]
         local quantity = tonumber(ARGV[2])
@@ -99,6 +102,12 @@ LUA,
         local CODE_SUCCESS = tonumber(ARGV[8])
         local CODE_ERR_INSUFFICIENT = tonumber(ARGV[9])
         local CODE_ERR_NOT_EXISTS = tonumber(ARGV[10])
+        local CODE_ERR_ORDER_CANCELED = tonumber(ARGV[11])
+        
+        -- 0. 取消拦截（并发场景：取消后重试不应再次扣减）
+        if redis.call('exists', cancel_key) == 1 then
+            return {CODE_ERR_ORDER_CANCELED, 0}
+        end
         
         -- 1. 幂等性检查
         if redis.call('exists', order_key) == 1 then
@@ -157,6 +166,60 @@ LUA,
         
         local total_sales = redis.call('get', sales_count_key)
         return {CODE_SUCCESS, total_sales or 0}
+LUA
+        ,
+        'cancel_order_with_stock' => <<<'LUA'
+        local stock_key = KEYS[1]
+        local soldout_key = KEYS[2]
+        local order_key = KEYS[3]
+        local cancel_key = KEYS[4]
+        local sales_count_key = KEYS[5]
+        local sales_amount_key = KEYS[6]
+        local leaderboard_count_key = KEYS[7]
+        local leaderboard_amount_key = KEYS[8]
+
+        local qty = tonumber(ARGV[1])
+        local amount = tonumber(ARGV[6])
+        local sku = ARGV[7]
+
+        local CODE_SUCCESS = tonumber(ARGV[2])
+        local CODE_ERR_ORDER_CANCELED = tonumber(ARGV[3])
+        local CODE_ERR_ORDER_NOT_PROCESSED = tonumber(ARGV[4])
+        local CODE_ERR_NOT_EXISTS = tonumber(ARGV[5])
+
+        -- 幂等：已经取消过，不重复回滚
+        if redis.call('exists', cancel_key) == 1 then
+            local remain = redis.call('get', stock_key)
+            return {CODE_ERR_ORDER_CANCELED, remain and tonumber(remain) or 0}
+        end
+
+        -- 订单未处理：无法回滚
+        if redis.call('exists', order_key) == 0 then
+            return {CODE_ERR_ORDER_NOT_PROCESSED, 0}
+        end
+
+        -- 库存未初始化
+        if redis.call('exists', stock_key) == 0 then
+            return {CODE_ERR_NOT_EXISTS, 0}
+        end
+
+        -- 回滚库存
+        local remain = redis.call('incrby', stock_key, qty)
+        if remain > 0 then
+            redis.call('del', soldout_key)
+        end
+
+        -- 回滚销售数据
+        redis.call('decrby', sales_count_key, qty)
+        redis.call('decrby', sales_amount_key, amount)
+        redis.call('zincrby', leaderboard_count_key, -qty, sku)
+        redis.call('zincrby', leaderboard_amount_key, -amount, sku)
+
+        -- 移除订单幂等标记，写入取消标记（避免并发重试再次扣减）
+        redis.call('del', order_key)
+        redis.call('setex', cancel_key, {{ORDER_TTL}}, '1')
+
+        return {CODE_SUCCESS, remain}
 LUA
     ];
 
@@ -302,20 +365,23 @@ LUA
                 return "库存不足，剩余 {$extra} 件";
             case self::CODE_ERR_NOT_EXISTS:
                 return '商品库存未初始化';
+            case self::CODE_ERR_ORDER_CANCELED:
+                return '订单已取消（防止重复处理）';
+            case self::CODE_ERR_ORDER_NOT_PROCESSED:
+                return '订单未处理或已过期，无法取消回滚';
             default:
                 return '未知错误';
         }
     }
 
     /**
-     * 原子性扣减库存并记录销售（推荐用于秒杀场景）
-     * 将库存扣减和销售记录放在同一个 Lua 脚本中，确保数据一致性
+     * 原子扣减库存并记录销售（含限购、幂等、售罄标记）。
      *
-     * @param string $sku 商品SKU
-     * @param string $userId 用户ID
+     * @param string $sku 商品 SKU
+     * @param string $userId 用户 ID
      * @param int $quantity 购买数量
-     * @param float $amount 金额（单位：分）
-     * @param string $orderId 订单ID
+     * @param int $amount 金额（单位：分）
+     * @param string $orderId 订单 ID（用于幂等）
      * @param int $limitPerUser 限购数量，0表示无限制
      * @return array
      */
@@ -323,7 +389,7 @@ LUA
         string $sku,
         string $userId,
         int    $quantity,
-        float  $amount,
+        int    $amount,
         string $orderId,
         int    $limitPerUser = 0
     ): array
@@ -331,9 +397,10 @@ LUA
         if ($quantity <= 0) {
             return ['code' => self::CODE_ERR_INVALID_QUANTITY, 'message' => '数量无效', 'remain' => null];
         }
-        if (!is_numeric($amount) || $amount < 0) {
+        if ($amount < 0) {
             return ['code' => self::CODE_ERR_INVALID_AMOUNT, 'message' => '金额无效', 'remain' => null];
         }
+
         $amountInCents = $amount;
 
         $tag = $this->keyPrefix;
@@ -347,6 +414,7 @@ LUA
         $orderKey = $tag . 'order:' . $orderId;
         $leaderCountKey = $tag . RedisConstants::LEADERBOARD_COUNT_SUFFIX;
         $leaderAmountKey = $tag . RedisConstants::LEADERBOARD_AMOUNT_SUFFIX;
+        $cancelKey = $tag . 'order:' . $orderId . RedisConstants::ORDER_CANCELED_SUFFIX;
 
         $keys = [
             $stockKey,           // KEYS[1]
@@ -357,7 +425,8 @@ LUA
             $salesCountKey,      // KEYS[6]
             $salesAmountKey,     // KEYS[7]
             $leaderCountKey,     // KEYS[8]
-            $leaderAmountKey     // KEYS[9]
+            $leaderAmountKey,    // KEYS[9]
+            $cancelKey           // KEYS[10]
         ];
 
         $args = [
@@ -370,7 +439,8 @@ LUA
             (int)self::CODE_ERR_LIMIT_EXCEEDED,
             (int)self::CODE_SUCCESS,
             (int)self::CODE_ERR_INSUFFICIENT,
-            (int)self::CODE_ERR_NOT_EXISTS
+            (int)self::CODE_ERR_NOT_EXISTS,
+            (int)self::CODE_ERR_ORDER_CANCELED
         ];
 
         try {
@@ -390,6 +460,79 @@ LUA
                 'code' => self::CODE_ERR_REDIS_UNAVAILABLE,
                 'message' => 'Redis集群写入异常: ' . $e->getMessage(),
                 'remain' => null
+            ];
+        }
+    }
+
+    /**
+     * 订单取消回滚：回滚库存 + 回滚销售数据（并发场景下会拦截重复回滚/重复扣减）
+     *
+     * @param string $sku 商品 SKU
+     * @param int $quantity 取消数量（与下单扣减数量一致）
+     * @param int $amount 取消金额（单位：分，与下单金额一致）
+     * @param string $orderId 订单 ID（与下单一致）
+     * @return array ['code'=>int,'message'=>string,'remain'=>int|null]
+     */
+    public function cancelOrderWithStock(
+        string $sku,
+        int    $quantity,
+        int    $amount,
+        string $orderId
+    ): array {
+        if ($quantity <= 0) {
+            return ['code' => self::CODE_ERR_INVALID_QUANTITY, 'message' => '数量无效', 'remain' => null];
+        }
+        if ($amount < 0) {
+            return ['code' => self::CODE_ERR_INVALID_AMOUNT, 'message' => '金额无效', 'remain' => null];
+        }
+
+        $tag = $this->keyPrefix;
+
+        $stockKey = $tag . $sku;
+        $soldOutKey = $tag . $sku . RedisConstants::SOLD_OUT_SUFFIX;
+        $orderKey = $tag . 'order:' . $orderId;
+        $cancelKey = $tag . 'order:' . $orderId . RedisConstants::ORDER_CANCELED_SUFFIX;
+        $salesCountKey = $tag . $sku . RedisConstants::SALES_COUNT_SUFFIX;
+        $salesAmountKey = $tag . $sku . RedisConstants::SALES_AMOUNT_SUFFIX;
+        $leaderCountKey = $tag . RedisConstants::LEADERBOARD_COUNT_SUFFIX;
+        $leaderAmountKey = $tag . RedisConstants::LEADERBOARD_AMOUNT_SUFFIX;
+
+        $keys = [
+            $stockKey,
+            $soldOutKey,
+            $orderKey,
+            $cancelKey,
+            $salesCountKey,
+            $salesAmountKey,
+            $leaderCountKey,
+            $leaderAmountKey,
+        ];
+
+        $args = [
+            $quantity,
+            (int)self::CODE_SUCCESS,
+            (int)self::CODE_ERR_ORDER_CANCELED,
+            (int)self::CODE_ERR_ORDER_NOT_PROCESSED,
+            (int)self::CODE_ERR_NOT_EXISTS,
+            $amount,
+            $sku,
+        ];
+
+        try {
+            $result = $this->execLuaWithRetry('cancel_order_with_stock', $keys, $args);
+            $code = (int)($result[0] ?? 0);
+            $extra = $result[1] ?? 0;
+
+            return [
+                'code' => $code,
+                'message' => $this->getMessageByCode($code, $extra),
+                'remain' => ($code === self::CODE_SUCCESS || $code === self::CODE_ERR_ORDER_CANCELED) ? (int)$extra : null,
+            ];
+        } catch (\Exception $e) {
+            return [
+                'code' => self::CODE_ERR_REDIS_UNAVAILABLE,
+                'message' => 'Redis集群写入异常: ' . $e->getMessage(),
+                'remain' => null,
             ];
         }
     }

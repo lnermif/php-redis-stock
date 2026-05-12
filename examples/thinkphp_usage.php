@@ -71,7 +71,11 @@ class StockService
         try {
             // 1. 预检查库存
             $stockInfo = $this->stockManager->getStock($sku);
-            
+
+            if ($stockInfo['code'] !== RedisStock::CODE_SUCCESS) {
+                return ['success' => false, 'message' => '系统繁忙，请稍后重试'];
+            }
+
             if ($stockInfo['stock'] === null) {
                 return ['success' => false, 'message' => '商品不存在'];
             }

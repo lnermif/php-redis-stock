@@ -35,6 +35,11 @@ final class RedisConstants
     /** 金额非法 */
     public const CODE_ERR_INVALID_AMOUNT = -7;
 
+    /** 订单已取消（并发下用于拦截重复扣减） */
+    public const CODE_ERR_ORDER_CANCELED = -8;
+    /** 订单未处理（取消时订单幂等标记不存在） */
+    public const CODE_ERR_ORDER_NOT_PROCESSED = -9;
+
     // -------------------------------------------------------------------------
     // Key 后缀（用于拼接完整 Key）
     // -------------------------------------------------------------------------
@@ -54,6 +59,8 @@ final class RedisConstants
     public const USER_PURCHASED_SET_PREFIX = 'user:';
     /** 订单幂等标记 Key 前缀 */
     public const ORDER_IDEMPOTENT_PREFIX = 'order:';
+    /** 订单取消标记后缀（配合并发场景做幂等） */
+    public const ORDER_CANCELED_SUFFIX = ':canceled';
 
     // -------------------------------------------------------------------------
     // 重试策略配置
