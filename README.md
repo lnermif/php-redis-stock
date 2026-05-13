@@ -40,9 +40,9 @@ $manager->initStocks(['PHONE' => 100, 'CASE' => 200], 3600);
 // 购买下单（原子扣减库存 + 记录销售）
 $result = $manager->purchase('PHONE', 'user_123', 1, 99900, 'ORDER_001');
 if ($result['success']) {
-echo "购买成功，剩余库存：" . $manager->getStock('PHONE')['data']['stock'];
+    echo "购买成功，剩余库存：" . $manager->getStock('PHONE')['data']['stock'];
 } else {
-echo "失败：" . $result['message'];
+    echo "失败：" . $result['message'];
 }
 
 // 取消订单（原子回滚库存 + 销售）
@@ -55,10 +55,10 @@ $manager->cancel('PHONE', 1, 99900, 'ORDER_001');
 
 ```php
 [
-'success' => bool,      // code 是否为 CODE_SUCCESS
-'code'    => int,       // 状态码
-'message' => string,    // 可读描述
-'data'    => mixed,     // 方法特有数据
+    'success' => bool,      // code 是否为 CODE_SUCCESS
+    'code'    => int,       // 状态码
+    'message' => string,    // 可读描述
+    'data'    => mixed,     // 方法特有数据
 ]
 ```
 
@@ -109,11 +109,12 @@ php examples/facade_usage.php
 ```php
 // 批量扣减（原子：全成功或全失败）
 $stockManager = new RedisStock($redis, '{shop}:');
-$res = $stockManager->decrMultiStocks(['SKU_A' => 2, 'SKU_B' => 1]);
-if ($res['success']) {
-foreach ($res['remain'] as $sku => $remain) {
-echo "$sku 剩余 $remain\n";
-}
+    $res = $stockManager->decrMultiStocks(['SKU_A' => 2, 'SKU_B' => 1]);
+    if ($res['success']) {
+        foreach ($res['remain'] as $sku => $remain) {
+            echo "$sku 剩余 $remain\n";
+        }
+    }
 }
 
 // 销售记录与排行榜
@@ -132,13 +133,13 @@ $salesManager->getUserPurchases('user_123');
 ```php
 // 在 AppServiceProvider 中注册
 $this->app->singleton(RedisStockSalesManager::class, function ($app) {
-$redis = $app['redis']->connection()->client();
-return new RedisStockSalesManager($redis, '{shop}:', $app['log']);
+    $redis = $app['redis']->connection()->client();
+    return new RedisStockSalesManager($redis, '{shop}:', $app['log']);
 });
 
 // 控制器中依赖注入即可
 public function buy(RedisStockSalesManager $manager, Request $request) {
-return $manager->purchase(...);
+    return $manager->purchase(...);
 }
 ```
 
