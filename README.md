@@ -1,123 +1,203 @@
+# PHP Redis 库存与销售管理库
+
+基于 Redis Lua 脚本的原子化库存扣减与销售记录组件，专为高并发电商场景设计。  
+提供**门面 (Facade)** 与**底层原子类**两种模式，兼顾易用性与灵活性。
 
 ---
 
-# RedisStock: 高并发原子库存管理方案
+## ✨ 特性
 
-`RedisStock` 是一个基于 PHP 和 Redis Lua 脚本构建的高性能库存管理组件。专为秒杀、大促等高并发场景设计，在确保**绝对不超卖**的同时，通过“售罄快照”机制极大提升了系统的吞吐量。
-
-## 🚀 核心特性
-
-* **原子性保证**：所有核心写操作均封装在 Redis Lua 脚本中执行，利用 Redis 单线程原子性杜绝竞态条件。
-* **售罄拦截（Sold-out Marker）**：当库存清零时自动生成轻量级标记，网关层可快速拦截无效请求，保护后端存储。
-* **集群兼容**：内置 Hash Tag `{}` 支持，确保库存主 Key 与售罄标记始终落在 Redis Cluster 的同一 Slot。
-* **状态自愈**：提供 `monitor()` 与 `repair()` 机制，能够自动识别并修复由于网络抖动或主从切换引起的状态不一致。
-* **故障弱化**：内置指数退避（Exponential Backoff）重试逻辑，优雅处理 Redis 瞬态连接故障。
-* **高度兼容**：支持 PHP 7.2+，无缝对接任何符合 PSR-3 标准的日志组件。
+- **原子操作** – 购买下单、取消订单均封装在 Redis Lua 脚本中，杜绝超卖、脏读。
+- **售罄快照** – 库存归零时自动生成售罄标记，网关可据此快速拦截无效请求。
+- **幂等 & 限购** – 基于订单 ID 的防重处理，支持用户维度的限购控制。
+- **集群兼容** – 内置 `{}` Hash Tag，确保相关 Key 落在同一 Redis Cluster Slot。
+- **状态自愈** – 提供 `monitor()` / `repair()` 检测并修复库存与售罄标记的不一致。
+- **自动重试** – 瞬态故障（网络抖动、主从切换）采用指数退避重试，对业务透明。
+- **统一响应** – 门面所有方法返回 `[success, code, message, data]` 结构，调用方解析简单。
+- **PSR‑3 日志** – 可注入 PSR‑3 兼容的日志组件，便于生产监控。
 
 ---
 
-## 🏗️ 架构设计
+## ⚙️ 快速开始
 
-系统采用“双重校验”模型：
+### 安装
 
-1.  **第一重：轻量级拦截 (`isSoldOut`)**
-    通过检查是否存在 `:soldout` 标记来快速判定，无需读取库存数值。
-2.  **第二重：原子操作 (`decr/incr`)**
-    在 Lua 脚本内部再次校验库存并执行扣减，确保最终一致性。
+```bash
+composer require nermif/php-redis-stock
+```
 
-
-
----
-
-## 🛠️ 安装要求
-
-* **PHP**: >= 7.2
-* **Redis**: >= 5.0 (建议 6.0+)
-* **PHP 扩展**: `php-redis`
-
----
-
-## 📖 快速上手
-
-### 1. 初始化
-建议使用带有 Hash Tag 的前缀以支持集群模式。
+### 基础使用（推荐门面）
 
 ```php
 $redis = new Redis();
 $redis->connect('127.0.0.1', 6379);
 
-// 建议前缀格式：{业务标识:库存}:
-$stockManager = new RedisStock($redis, '{seckill:stock}:', $logger);
-```
+$manager = new RedisStockSalesManager($redis, '{shop}:');
 
-### 2. 库存初始化
-```php
-$stocks = [
-    'iphone_15' => 100,
-    'macbook_pro' => 50
-];
-// 设置 3600 秒后自动过期
-$stockManager->initStocks($stocks, 3600);
-```
+// 初始化库存
+$manager->initStocks(['PHONE' => 100, 'CASE' => 200], 3600);
 
-### 3. 安全扣减
-```php
-$result = $stockManager->decrStock('iphone_15', 1);
-
-if ($result['code'] === RedisStock::CODE_SUCCESS) {
-    echo "下单成功，剩余库存：" . $result['remain'];
-} elseif ($result['code'] === RedisStock::CODE_ERR_INSUFFICIENT) {
-    echo "手慢了，库存不足";
+// 购买下单（原子扣减库存 + 记录销售）
+$result = $manager->purchase('PHONE', 'user_123', 1, 99900, 'ORDER_001');
+if ($result['success']) {
+echo "购买成功，剩余库存：" . $manager->getStock('PHONE')['data']['stock'];
+} else {
+echo "失败：" . $result['message'];
 }
+
+// 取消订单（原子回滚库存 + 销售）
+$manager->cancel('PHONE', 1, 99900, 'ORDER_001');
 ```
 
-### 4. 批量扣减（订单事务）
-支持多规格（SKU）同时扣减，要么全部成功，要么全部失败。
-```php
-$items = ['sku_1' => 2, 'sku_2' => 1];
-$res = $stockManager->decrMultiStocks($items);
+### 统一响应格式
 
-if ($res['success']) {
-    // 扣减成功
-}
+门面所有方法均返回：
+
+```php
+[
+'success' => bool,      // code 是否为 CODE_SUCCESS
+'code'    => int,       // 状态码
+'message' => string,    // 可读描述
+'data'    => mixed,     // 方法特有数据
+]
 ```
 
 ---
 
-## 🔍 监控与维护
+## 🏁 错误码一览
 
-### 状态一致性检测
-在高并发环境下，建议开启异步巡检任务，调用 `monitor` 和 `repair`：
+| 常量 | 值 | 含义 |
+|------|----|------|
+| `CODE_SUCCESS` | 1 | 成功 |
+| `CODE_ERR_INSUFFICIENT` | -1 | 库存不足 |
+| `CODE_ERR_NOT_EXISTS` | -2 | 库存未初始化 |
+| `CODE_ERR_INVALID_QUANTITY` | -3 | 数量非法（≤0） |
+| `CODE_ERR_REDIS_UNAVAILABLE` | -4 | Redis 服务不可用 |
+| `CODE_ERR_LIMIT_EXCEEDED` | -5 | 超过限购数量 |
+| `CODE_ERR_ALREADY_PROCESSED` | -6 | 订单已处理（幂等拦截） |
+| `CODE_ERR_INVALID_AMOUNT` | -7 | 金额非法 |
+| `CODE_ERR_ORDER_CANCELED` | -8 | 订单已取消（并发拦截） |
+| `CODE_ERR_ORDER_NOT_PROCESSED` | -9 | 订单未处理（取消时） |
+
+门面类和底层类都实现了 `StockSalesCodes` 接口，可以直接通过 `类名::CODE_XXX` 判断返回值。
+
+---
+
+## 🗂️ 示例项目
+
+示例代码位于 `examples/` 目录：
+
+| 文件 | 说明 |
+|------|------|
+| `facade_usage.php` | ⭐ 推荐 – 门面类完整示例 |
+| `seckill_demo.php` | 秒杀全流程演示（库存+销售+排行榜） |
+| `stock_usage.php` | 库存高级用法（批量、监控、修复） |
+| `framework_usage.php` | Laravel / ThinkPHP 集成代码片段 |
+
+运行示例前确保 Redis 已启动：
+
+```bash
+php examples/facade_usage.php
+```
+
+---
+
+## 🧩 高级用法（直接使用底层类）
+
+如果需要门面未提供的能力（如批量扣减、自定义重试），可以直接操作 `RedisStock` 和 `RedisSales`：
 
 ```php
-$status = $stockManager->monitor('iphone_15');
+// 批量扣减（原子：全成功或全失败）
+$stockManager = new RedisStock($redis, '{shop}:');
+$res = $stockManager->decrMultiStocks(['SKU_A' => 2, 'SKU_B' => 1]);
+if ($res['success']) {
+foreach ($res['remain'] as $sku => $remain) {
+echo "$sku 剩余 $remain\n";
+}
+}
 
-if (!$status['consistency']) {
-    // 发现状态不一致（如：库存 > 0 但有售罄标记）
-    $stockManager->repair('iphone_15');
+// 销售记录与排行榜
+$salesManager = new RedisSales($redis, '{shop}:');
+$salesManager->getSalesLeaderboard(0, 9);
+$salesManager->getUserPurchases('user_123');
+```
+
+底层类同样实现 `StockSalesCodes`，可使用统一的错误码常量。
+
+---
+
+## 🔧 框架集成
+
+### Laravel
+```php
+// 在 AppServiceProvider 中注册
+$this->app->singleton(RedisStockSalesManager::class, function ($app) {
+$redis = $app['redis']->connection()->client();
+return new RedisStockSalesManager($redis, '{shop}:', $app['log']);
+});
+
+// 控制器中依赖注入即可
+public function buy(RedisStockSalesManager $manager, Request $request) {
+return $manager->purchase(...);
 }
 ```
 
-### 返回码参考
+### ThinkPHP
+```php
+$redis = \think\facade\Cache::store('redis')->handler();
+$manager = new \Nermif\RedisStockSalesManager($redis, '{mall}:');
+```
 
-| 常量 | 值 | 描述 |
-| :--- | :--- | :--- |
-| `CODE_SUCCESS` | 1 | 操作成功 |
-| `CODE_ERR_INSUFFICIENT` | -1 | 库存不足 |
-| `CODE_ERR_NOT_EXISTS` | -2 | 库存 Key 不存在（未初始化） |
-| `CODE_ERR_INVALID_QUANTITY` | -3 | 传入的数量参数非法 |
-| `CODE_ERR_REDIS_UNAVAILABLE`| -4 | Redis 服务异常 |
+---
+
+## 🏗️ 内部架构（面向高阶开发者）
+
+系统通过**门面模式**组织对外接口，内部分工清晰：
+
+```
+┌─────────────────────────────────┐
+│    RedisStockSalesManager       │  ← 推荐入口（统一格式）
+│    - purchase()    - cancel()   │
+│    - getStock()    - initStocks │
+└─────────────┬───────────────────┘
+│ 组合
+┌──────────────┴──────────────┐
+▼                              ▼
+┌───────────────┐              ┌───────────────┐
+│  RedisStock    │              │  RedisSales   │  ← 底层原子类
+│  - 库存 CRUD   │              │  - 销售记录   │
+│  - 批量扣减    │              │  - 幂等/限购  │
+│  - 监控/修复   │              │  - 排行榜     │
+└───────────────┘              └───────────────┘
+```
+
+**购买流程**：`purchase()` 内部调用 `recordPurchaseWithStock` Lua 脚本，一次性原子完成：  
+库存校验 → 限购检查 → 库存扣减 → 售罄标记 → 记录销量/销售额/排行榜 → 订单幂等标记。
+
+用户无需分别调用 `decrStock()` + `recordPurchase()`，也无需在业务层手动判断售罄。
 
 ---
 
 ## ⚠️ 生产环境建议
 
-1.  **Redis 逐出策略**：建议将 Redis 的 `maxmemory-policy` 设置为 `volatile-lru`。
-2.  **前缀管理**：务必使用 `{}` 包裹前缀的核心部分（如 `{stock}:`），否则 `decr_multi` 等多 Key 操作在集群环境下会报错。
-3.  **日志记录**：务必注入 `Logger`。当 `repair` 触发修复动作时，可以通过日志追踪底层系统的异常抖动。
-4.  **数量限制**：`decrMultiStocks` 虽然支持原子扣减多个 SKU，但建议单次数量不要超过 20 个，以防止长时间阻塞 Redis 单线程。
+1. **Key 前缀** – 务必使用 `{}` 包裹前缀核心部分（如 `{stock}:`），否则多 Key 操作在集群下会报 `CROSSSLOT`。
+2. **Redis 配置** – `maxmemory-policy` 建议设为 `volatile-lru`，避免意外驱逐导致售罄标记丢失。
+3. **日志注入** – 建议注入 PSR‑3 日志器。当 `repair()` 触发修复时可通过日志追踪底层异常。
+4. **批量操作** – `decrMultiStocks` 虽然支持原子扣减，但单次 SKU 数建议不超过 20，避免长时间阻塞 Redis。
+5. **限购过期的理解** – 用户购买记录的 TTL 默认为 30 天，超时后限购计数自动清零，请按业务需求调整。
 
 ---
 
-## 📄 License
+## 🧪 测试
+
+测试套件包含 120+ 用例，覆盖库存、销售、门面层及边界场景。
+
+```bash
+./vendor/bin/phpunit
+```
+
+---
+
+## 📄 许可
+
 MIT License. 可自由用于个人或商业项目。
