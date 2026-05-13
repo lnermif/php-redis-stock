@@ -8,10 +8,6 @@ use Redis;
 use Psr\Log\NullLogger;
 use Nermif\RedisConstants;
 
-/**
- * RedisStock 生产级全路径单元测试套件
- * 覆盖：初始化、增减逻辑、批量原子性、售罄拦截、一致性自愈、边界异常、生命周期
- */
 class RedisStockTest extends TestCase
 {
     private $redis;
@@ -75,10 +71,12 @@ class RedisStockTest extends TestCase
     public function testGetStocksMix()
     {
         $this->stockManager->initStocks(['EXISTS' => 50]);
-        $result = $this->stockManager->getStocks(['EXISTS', 'NOT_EXISTS', '']);
+        // 移除空字符串，替换为合法的不存在 SKU
+        $result = $this->stockManager->getStocks(['EXISTS', 'NOT_EXISTS', 'MISSING']);
         $this->assertEquals(RedisStock::CODE_SUCCESS, $result['code']);
         $this->assertEquals(50, $result['data']['EXISTS']);
         $this->assertNull($result['data']['NOT_EXISTS']);
+        $this->assertNull($result['data']['MISSING']);
     }
 
     public function testGetStocksEmptyArray()
@@ -276,11 +274,15 @@ class RedisStockTest extends TestCase
         $this->assertTrue($res['consistency']);
     }
 
+    /**
+     * 修改：非法 SKU 现在应被拦截并返回 CODE_ERR_INVALID_QUANTITY
+     */
     public function testSpecialCharacters()
     {
         $sku = 'PROD:123#{HASH}';
+        // initStocks 会抛异常，因为 SKU 非法
+        $this->expectException(\InvalidArgumentException::class);
         $this->stockManager->initStocks([$sku => 100]);
-        $this->assertEquals(100, $this->stockManager->getStock($sku)['stock']);
     }
 
     public function testConcurrentSimulation()
@@ -410,14 +412,13 @@ class RedisStockTest extends TestCase
         $sku = 'TTL_CAP';
         $ttl = RedisConstants::MAX_TTL + 100;
         $this->stockManager->initStocks([$sku => 10], $ttl);
-        // 验证 Key 的 TTL 不大于 MAX_TTL（由于测试环境可快速过期，这里只检查 TTL 值 ≤ MAX_TTL）
+        // 验证 Key 的 TTL 不大于 MAX_TTL
         $stockKey = $this->testPrefix . $sku;
         $actualTtl = $this->redis->ttl($stockKey);
-        // TTL 可能为 -1（永不过期）或大于 0
         if ($actualTtl > 0) {
             $this->assertLessThanOrEqual(RedisConstants::MAX_TTL, $actualTtl);
         } else {
-            $this->assertEquals(-1, $actualTtl, 'TTL 可能被设为永不过期（当原 TTL 为 0 时）');
+            $this->assertEquals(-1, $actualTtl, 'TTL 可能被设为永不过期');
         }
     }
 
@@ -455,6 +456,6 @@ class RedisStockTest extends TestCase
         $this->assertEquals(0, $res['stock']);
         $this->assertEquals(-2, $res['ttl']);
         $this->assertFalse($res['is_sold_out']);
-        $this->assertTrue($res['consistency']); // 不存在但无标记，一致
+        $this->assertTrue($res['consistency']);
     }
 }

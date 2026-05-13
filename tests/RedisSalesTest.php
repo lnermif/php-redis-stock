@@ -7,10 +7,6 @@ use Nermif\RedisSales;
 use Redis;
 use Psr\Log\NullLogger;
 
-/**
- * RedisSales 生产级全路径单元测试套件
- * 覆盖：购买记录、限购逻辑、幂等性、销售额统计、排行榜、数据清理、边界异常
- */
 class RedisSalesTest extends TestCase
 {
     private $redis;
@@ -107,7 +103,7 @@ class RedisSalesTest extends TestCase
     {
         $result = $this->salesManager->recordPurchase('SKU003', 'USER001', 1, -1000, 'ORDER003');
         $this->assertEquals(RedisSales::CODE_ERR_INVALID_AMOUNT, $result['code']);
-        $this->assertStringContainsString('金额无效', $result['message']); // 修改断言
+        $this->assertStringContainsString('金额无效', $result['message']);
     }
 
     public function testRecordPurchaseSmallAmount()
@@ -118,7 +114,7 @@ class RedisSalesTest extends TestCase
 
         $amountResult = $this->salesManager->getSalesAmount($sku);
         $this->assertEquals(RedisSales::CODE_SUCCESS, $amountResult['code']);
-        $this->assertEquals(3, $amountResult['data']); // 改为整数 3 分
+        $this->assertEquals(3, $amountResult['data']);
     }
 
     public function testRecordPurchaseLargeAmount()
@@ -181,7 +177,8 @@ class RedisSalesTest extends TestCase
 
         $orderKey = $this->testPrefix . 'order:' . $orderId;
         $this->redis->setex($orderKey, 1, '1');
-        sleep(2);
+        // 模拟订单标记过期：直接删除
+        $this->redis->expire($orderKey, 0); // 或 del($orderKey)
 
         $result = $this->salesManager->recordPurchase($sku, 'USER001', 1, 1000, $orderId);
         $this->assertEquals(RedisSales::CODE_SUCCESS, $result['code']);
@@ -386,7 +383,7 @@ class RedisSalesTest extends TestCase
 
         $amountResult = $this->salesManager->getSalesAmount('SKU_AMT');
         $this->assertEquals(RedisSales::CODE_SUCCESS, $amountResult['code']);
-        $this->assertEquals(29970, $amountResult['data']); // 9990 + 19980 = 29970
+        $this->assertEquals(29970, $amountResult['data']);
     }
 
     public function testGetSalesAmountNotExists()
@@ -452,7 +449,7 @@ class RedisSalesTest extends TestCase
         $this->assertIsArray($leaderboard);
         $firstSku = array_key_first($leaderboard);
         $this->assertEquals('SKU_RICH1', $firstSku);
-        $this->assertEquals(100000, $leaderboard[$firstSku]); // 分，而不是元
+        $this->assertEquals(100000, $leaderboard[$firstSku]);
     }
 
     public function testLeaderboardPagination()
@@ -544,30 +541,32 @@ class RedisSalesTest extends TestCase
     }
 
     // -------------------------------------------------------------------------
-    // 11. 特殊字符与边界场景
+    // 11. 特殊字符与边界场景 (已根据新增 IdSanitizer 规则调整)
     // -------------------------------------------------------------------------
 
+    /**
+     * 修改：非法 SKU 现在应被拦截并返回 CODE_ERR_INVALID_QUANTITY
+     */
     public function testSpecialCharactersInSku()
     {
         $sku = 'PROD:123#{TEST}';
         $result = $this->salesManager->recordPurchase($sku, 'USER_SPEC', 1, 1000, 'ORDER_SPEC');
-        $this->assertEquals(RedisSales::CODE_SUCCESS, $result['code']);
-
-        $countResult = $this->salesManager->getSalesCount($sku);
-        $this->assertEquals(1, $countResult['data']);
+        $this->assertEquals(RedisSales::CODE_ERR_INVALID_QUANTITY, $result['code']);
     }
 
+    /**
+     * 修改：非法 userId 现在应被拦截并返回 CODE_ERR_INVALID_QUANTITY
+     */
     public function testSpecialCharactersInUserId()
     {
         $userId = 'user:test#123';
         $result = $this->salesManager->recordPurchase('SKU_USR', $userId, 1, 1000, 'ORDER_USR');
-        $this->assertEquals(RedisSales::CODE_SUCCESS, $result['code']);
-
-        $purchasesResult = $this->salesManager->getUserPurchases($userId);
-        $this->assertEquals(RedisSales::CODE_SUCCESS, $purchasesResult['code']);
-        $this->assertCount(1, $purchasesResult['data']);
+        $this->assertEquals(RedisSales::CODE_ERR_INVALID_QUANTITY, $result['code']);
     }
 
+    /**
+     * orderId 未经过 isValidId 校验，此测试保持原有预期
+     */
     public function testSpecialCharactersInOrderId()
     {
         $orderId = 'ORD:2024#TEST_001';
@@ -578,14 +577,18 @@ class RedisSalesTest extends TestCase
         $this->assertTrue($orderResult['data']);
     }
 
+    /**
+     * 修改：空字符串参数现在会被 isValidId 拦截，返回错误
+     */
     public function testEmptyStringParameters()
     {
         $result = $this->salesManager->recordPurchase('', 'U1', 1, 1000, 'ORDER_EMPTY');
-        $this->assertEquals(RedisSales::CODE_SUCCESS, $result['code']);
+        $this->assertEquals(RedisSales::CODE_ERR_INVALID_QUANTITY, $result['code']);
 
         $result2 = $this->salesManager->recordPurchase('SKU_EMPTY', '', 1, 1000, 'ORDER_EMPTY2');
-        $this->assertEquals(RedisSales::CODE_SUCCESS, $result2['code']);
+        $this->assertEquals(RedisSales::CODE_ERR_INVALID_QUANTITY, $result2['code']);
 
+        // 空 orderId 未被校验，保持原样
         $result3 = $this->salesManager->recordPurchase('SKU_EMPTY', 'U1', 1, 1000, '');
         $this->assertEquals(RedisSales::CODE_SUCCESS, $result3['code']);
     }
@@ -671,7 +674,7 @@ class RedisSalesTest extends TestCase
         }
 
         $amountResult = $this->salesManager->getSalesAmount($sku);
-        $this->assertEquals(100, $amountResult['data']); // 100 分
+        $this->assertEquals(100, $amountResult['data']);
     }
 
     public function testIntegerBoundaryValues()
@@ -687,7 +690,7 @@ class RedisSalesTest extends TestCase
     }
 
     // =========================================================================
-    // 以下为补充的边界测试方法（已删除精度校验，保持整数分）
+    // 以下为补充的边界测试方法（已与 IdSanitizer 对齐）
     // =========================================================================
 
     /**
@@ -812,12 +815,11 @@ class RedisSalesTest extends TestCase
     }
 
     // =========================================================================
-    // 补充的测试用例（覆盖高、中优先级缺失项）
+    // 补充的测试用例（覆盖高、中优先级缺失项，已适配新校验）
     // =========================================================================
 
     /**
      * 测试：recordPurchaseWithStock 数量为 0
-     * 预期：返回 CODE_ERR_INVALID_QUANTITY
      */
     public function testRecordPurchaseWithStockZeroQuantity()
     {
@@ -833,7 +835,6 @@ class RedisSalesTest extends TestCase
 
     /**
      * 测试：recordPurchaseWithStock 数量为负数
-     * 预期：返回 CODE_ERR_INVALID_QUANTITY
      */
     public function testRecordPurchaseWithStockNegativeQuantity()
     {
@@ -848,7 +849,6 @@ class RedisSalesTest extends TestCase
 
     /**
      * 测试：recordPurchaseWithStock 金额为负数
-     * 预期：返回 CODE_ERR_INVALID_AMOUNT
      */
     public function testRecordPurchaseWithStockNegativeAmount()
     {
@@ -863,7 +863,6 @@ class RedisSalesTest extends TestCase
 
     /**
      * 测试：recordPurchaseWithStock 限购超限场景
-     * 预期：返回 CODE_ERR_LIMIT_EXCEEDED，并返回剩余可购买数量
      */
     public function testRecordPurchaseWithStockExceedLimit()
     {
@@ -885,7 +884,6 @@ class RedisSalesTest extends TestCase
 
     /**
      * 测试：recordPurchase 返回值结构完整性
-     * 预期：返回数组必须包含 code, message, total_sales, remaining_limit 四个键
      */
     public function testRecordPurchaseReturnStructure()
     {
@@ -900,7 +898,6 @@ class RedisSalesTest extends TestCase
 
     /**
      * 测试：isOrderProcessed 返回值结构完整性
-     * 预期：返回数组必须包含 code 和 data
      */
     public function testIsOrderProcessedReturnStructure()
     {
@@ -913,13 +910,11 @@ class RedisSalesTest extends TestCase
     }
 
     /**
-     * 测试：getMultipleSalesCounts 混合存在和不存在的 SKU（已存在类似测试，但单独强化结构验证）
-     * 预期：返回数组中已存在的 SKU 有具体数值，不存在的为 0
+     * 测试：getMultipleSalesCounts 混合存在和不存在的 SKU
      */
     public function testGetMultipleSalesCountsMixed()
     {
         $this->salesManager->recordPurchase('SKU_MIX_EXISTS', 'U1', 5, 5000, 'ORDER_MIX1');
-        // 不存在的 SKU 为 SKU_MIX_MISSING
 
         $result = $this->salesManager->getMultipleSalesCounts(['SKU_MIX_EXISTS', 'SKU_MIX_MISSING']);
         $this->assertEquals(RedisSales::CODE_SUCCESS, $result['code']);
