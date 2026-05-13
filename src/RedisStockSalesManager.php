@@ -383,28 +383,48 @@ class RedisStockSalesManager implements StockSalesCodes
 
     /**
      * 全量同步活跃 SKU 列表
+     *
+     * @param array $skus 字符串 SKU 列表
+     * @return array ['success' => bool, 'code' => int, 'message' => string, 'data' => null]
      */
-    public function syncActiveSkus(array $skus): void
+    public function syncActiveSkus(array $skus): array
     {
-        $this->stockManager->syncActiveSkus($skus);
+        try {
+            $this->stockManager->syncActiveSkus($skus);
+            return $this->response(self::CODE_SUCCESS, '同步成功');
+        } catch (\RuntimeException $e) {
+            return $this->response(self::CODE_ERR_REDIS_UNAVAILABLE, '同步失败：' . $e->getMessage());
+        }
     }
 
     /**
      * 获取当前所有活跃 SKU
+     *
+     * @return array ['success' => bool, 'code' => int, 'message' => string, 'data' => string[]]
      */
     public function getActiveSkus(): array
     {
-        return $this->stockManager->getActiveSkus();
+        try {
+            $skus = $this->stockManager->getActiveSkus();
+            return $this->response(self::CODE_SUCCESS, 'OK', $skus);
+        } catch (\RuntimeException $e) {
+            return $this->response(self::CODE_ERR_REDIS_UNAVAILABLE, '查询失败：' . $e->getMessage());
+        }
     }
 
     /**
      * 将指定 SKU 移出活跃集合（使其不可售）
      *
      * @param string $sku
-     * @return void
+     * @return array ['success' => bool, 'code' => int, 'message' => string, 'data' => null]
      */
-    public function removeActiveSku(string $sku): void
+    public function removeActiveSku(string $sku): array
     {
-        $this->stockManager->removeActiveSku($sku);
+        try {
+            $this->stockManager->removeActiveSku($sku);
+            return $this->response(self::CODE_SUCCESS, '移除成功');
+        } catch (\RuntimeException $e) {
+            return $this->response(self::CODE_ERR_REDIS_UNAVAILABLE, '移除失败：' . $e->getMessage());
+        }
     }
 }
