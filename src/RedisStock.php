@@ -704,4 +704,67 @@ LUA,
             ];
         }
     }
+
+    /**
+     * 检查 SKU 是否在活跃集合中（即是否参与当前活动）
+     *
+     * @param string $sku
+     * @return bool
+     */
+    public function isSkuActive(string $sku): bool
+    {
+        return (bool) $this->readWithRetry(function ($redis) use ($sku) {
+            $key = $this->keyPrefix . RedisConstants::ACTIVE_SKUS_KEY;
+            return $redis->sIsMember($key, $sku);
+        });
+    }
+
+    /**
+     * 全量同步活跃 SKU 集合
+     * 会清空旧集合并写入新集合，应由管理后台/定时任务调用
+     *
+     * @param array $skus 字符串 SKU 列表
+     * @return void
+     * @throws \RuntimeException 写入失败时抛出
+     */
+    public function syncActiveSkus(array $skus): void
+    {
+        $key = $this->keyPrefix . RedisConstants::ACTIVE_SKUS_KEY;
+        $this->writeWithRetry(function ($redis) use ($key, $skus) {
+            $pipe = $redis->multi(\Redis::PIPELINE);
+            $pipe->del($key);
+            if (!empty($skus)) {
+                $pipe->sAddArray($key, $skus);
+            }
+            return $pipe->exec();
+        });
+    }
+
+    /**
+     * 获取当前所有活跃 SKU
+     *
+     * @return array
+     */
+    public function getActiveSkus(): array
+    {
+        return $this->readWithRetry(function ($redis) {
+            return $redis->sMembers($this->keyPrefix . RedisConstants::ACTIVE_SKUS_KEY);
+        });
+    }
+
+    /**
+     * 从活跃 SKU 集合中移除指定 SKU
+     * 若该 SKU 本来就不在集合中，操作无副作用
+     *
+     * @param string $sku
+     * @return void
+     * @throws \RuntimeException 写入失败时抛出
+     */
+    public function removeActiveSku(string $sku): void
+    {
+        $key = $this->keyPrefix . RedisConstants::ACTIVE_SKUS_KEY;
+        $this->writeWithRetry(function ($redis) use ($key, $sku) {
+            $redis->sRem($key, $sku);
+        });
+    }
 }

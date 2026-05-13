@@ -62,6 +62,13 @@ final class RedisConstants
     /** 订单取消标记后缀（配合并发场景做幂等） */
     public const ORDER_CANCELED_SUFFIX = ':canceled';
 
+    /**
+     * 活跃 SKU 集合 Key 后缀
+     * 用于管理当前参与活动的 SKU 列表
+     * 完整 Key：{product:stock}:active:skus
+     */
+    public const ACTIVE_SKUS_KEY = 'active:skus';
+
     // -------------------------------------------------------------------------
     // 重试策略配置
     // -------------------------------------------------------------------------

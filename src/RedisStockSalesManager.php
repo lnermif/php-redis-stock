@@ -125,6 +125,9 @@ class RedisStockSalesManager implements StockSalesCodes
         if (!$this->isValidId($userId)) {
             return $this->response(self::CODE_ERR_INVALID_QUANTITY, '用户ID包含非法字符');
         }
+        if (!$this->isSkuActive($sku)) {
+            return $this->response(self::CODE_ERR_INVALID_QUANTITY, '该商品当前不可售');
+        }
 
         $result = $this->salesManager->recordPurchaseWithStock(
             $sku, $userId, $quantity, $amount, $orderId, $limitPerUser
@@ -368,5 +371,40 @@ class RedisStockSalesManager implements StockSalesCodes
         return $this->response($code, $message, [
             'repair_code' => $res['repair_code'] ?? -1,
         ]);
+    }
+
+    /**
+     * 检查 SKU 是否处于活跃（可售）状态
+     */
+    private function isSkuActive(string $sku): bool
+    {
+        return $this->stockManager->isSkuActive($sku);
+    }
+
+    /**
+     * 全量同步活跃 SKU 列表
+     */
+    public function syncActiveSkus(array $skus): void
+    {
+        $this->stockManager->syncActiveSkus($skus);
+    }
+
+    /**
+     * 获取当前所有活跃 SKU
+     */
+    public function getActiveSkus(): array
+    {
+        return $this->stockManager->getActiveSkus();
+    }
+
+    /**
+     * 将指定 SKU 移出活跃集合（使其不可售）
+     *
+     * @param string $sku
+     * @return void
+     */
+    public function removeActiveSku(string $sku): void
+    {
+        $this->stockManager->removeActiveSku($sku);
     }
 }
