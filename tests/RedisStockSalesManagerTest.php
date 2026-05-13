@@ -48,7 +48,7 @@ class RedisStockSalesManagerTest extends TestCase
     {
         $sku = 'FORMAT_SKU';
         $this->manager->initStocks([$sku => 10]);
-
+        $this->manager->syncActiveSkus([$sku]);
         $result = $this->manager->purchase($sku, 'U1', 1, 100, 'ORDER_RESP');
 
         $this->assertArrayHasKey('success', $result);
@@ -81,7 +81,7 @@ class RedisStockSalesManagerTest extends TestCase
         $orderId = 'ORDER_BUY_001';
 
         $this->manager->initStocks([$sku => 10]);
-
+        $this->manager->syncActiveSkus([$sku]);
         // 购买成功
         $purchase = $this->manager->purchase($sku, $userId, 2, 1999, $orderId);
         $this->assertTrue($purchase['success']);
@@ -107,7 +107,7 @@ class RedisStockSalesManagerTest extends TestCase
     {
         $sku = 'SKU_LOW';
         $this->manager->initStocks([$sku => 3]);
-
+        $this->manager->syncActiveSkus([$sku]);
         $result = $this->manager->purchase($sku, 'U1', 5, 500, 'ORDER_LOW');
         $this->assertFalse($result['success']);
         $this->assertEquals(StockSalesCodes::CODE_ERR_INSUFFICIENT, $result['code']);
@@ -116,6 +116,8 @@ class RedisStockSalesManagerTest extends TestCase
 
     public function testPurchaseNotInitialized(): void
     {
+        // 不初始化库存，但需要激活 SKU
+        $this->manager->syncActiveSkus(['SKU_NO_INIT']);  // 先激活
         $result = $this->manager->purchase('SKU_NO_INIT', 'U1', 1, 100, 'ORDER_NO_INIT');
         $this->assertFalse($result['success']);
         $this->assertEquals(StockSalesCodes::CODE_ERR_NOT_EXISTS, $result['code']);
@@ -128,6 +130,7 @@ class RedisStockSalesManagerTest extends TestCase
         $limit = 2;
 
         $this->manager->initStocks([$sku => 10]);
+        $this->manager->syncActiveSkus([$sku]);
 
         // 第一单成功
         $result1 = $this->manager->purchase($sku, $userId, 2, 200, 'ORDER_L1', $limit);
@@ -146,6 +149,7 @@ class RedisStockSalesManagerTest extends TestCase
         $orderId = 'ORDER_IDEM';
 
         $this->manager->initStocks([$sku => 5]);
+        $this->manager->syncActiveSkus([$sku]);
 
         $result1 = $this->manager->purchase($sku, 'U1', 1, 100, $orderId);
         $this->assertTrue($result1['success']);
@@ -161,6 +165,7 @@ class RedisStockSalesManagerTest extends TestCase
         $orderId = 'ORDER_CANCEL';
 
         $this->manager->initStocks([$sku => 5]);
+        $this->manager->syncActiveSkus([$sku]);
         $this->manager->purchase($sku, 'U1', 2, 200, $orderId);
         $this->manager->cancel($sku, 2, 200, $orderId);
 
@@ -227,6 +232,7 @@ class RedisStockSalesManagerTest extends TestCase
     public function testPurchaseNegativeAmount(): void
     {
         $this->manager->initStocks(['SKU_NEGAMT' => 10]);
+        $this->manager->syncActiveSkus(['SKU_NEGAMT']);
         $result = $this->manager->purchase('SKU_NEGAMT', 'U1', 1, -100, 'O_NEGAMT');
         $this->assertFalse($result['success']);
         $this->assertEquals(StockSalesCodes::CODE_ERR_INVALID_AMOUNT, $result['code']);
@@ -297,6 +303,7 @@ class RedisStockSalesManagerTest extends TestCase
     {
         $sku = 'ERR_TEST';
         $this->manager->initStocks([$sku => 2]);
+        $this->manager->syncActiveSkus([$sku]);
 
         $methods = [
             'purchase' => ['ERR_TEST', 'U1', 5, 100, 'O1'],
@@ -328,11 +335,112 @@ class RedisStockSalesManagerTest extends TestCase
 
         // 确保库存存在
         $this->manager->initStocks([$longSku => 5]);
+        $this->manager->syncActiveSkus([$longSku]);
 
         $result = $this->manager->purchase($longSku, $longUserId, 1, 100, $longOrderId);
         $this->assertTrue($result['success']);
         $this->assertEquals(StockSalesCodes::CODE_SUCCESS, $result['code']);
         // 可选：验证 data 中的 SKU 等字段与原值一致
         $this->assertEquals($longSku, $result['data']['sku']);
+    }
+
+    // -------------------------------------------------------------------------
+// 6. 活跃 SKU 管理测试
+// -------------------------------------------------------------------------
+
+    public function testPurchaseBlockedWhenSkuNotActive(): void
+    {
+        $sku = 'SKU_INACTIVE';
+        // 库存存在但不在活跃集合中
+        $this->manager->initStocks([$sku => 10]);
+        // 默认未同步任何活跃 SKU，所以 isSkuActive 返回 false
+
+        $result = $this->manager->purchase($sku, 'U1', 1, 100, 'ORDER_INACTIVE');
+        $this->assertFalse($result['success']);
+        $this->assertEquals(StockSalesCodes::CODE_ERR_INVALID_QUANTITY, $result['code']);
+        $this->assertStringContainsString('不可售', $result['message']);
+    }
+
+    public function testPurchaseWorksAfterActivatingSku(): void
+    {
+        $sku = 'SKU_ACTIVE';
+        $this->manager->initStocks([$sku => 5]);
+        // 将 SKU 设为活跃
+        $this->manager->syncActiveSkus([$sku]);
+
+        $result = $this->manager->purchase($sku, 'U1', 1, 100, 'ORDER_ACTIVE');
+        $this->assertTrue($result['success']);
+        $this->assertEquals(StockSalesCodes::CODE_SUCCESS, $result['code']);
+    }
+
+    public function testIsSkuActiveViaManager(): void
+    {
+        $sku = 'SKU_CHECK';
+        // 初始状态为空数组
+        $result = $this->manager->getActiveSkus();
+        $this->assertTrue($result['success']);
+        $this->assertEmpty($result['data']);
+
+        $this->manager->syncActiveSkus([$sku]);
+        $active = $this->manager->getActiveSkus();
+        $this->assertTrue($active['success']);
+        $this->assertContains($sku, $active['data']);
+
+        $this->manager->removeActiveSku($sku);
+        $activeAfter = $this->manager->getActiveSkus();
+        $this->assertTrue($activeAfter['success']);
+        $this->assertNotContains($sku, $activeAfter['data']);
+    }
+
+    public function testSyncActiveSkusViaManager(): void
+    {
+        $this->manager->syncActiveSkus(['MGR_A', 'MGR_B']);
+        $active = $this->manager->getActiveSkus();
+        $this->assertTrue($active['success']);
+        $this->assertContains('MGR_A', $active['data']);
+        $this->assertContains('MGR_B', $active['data']);
+        $this->assertCount(2, $active['data']);
+    }
+
+    public function testRemoveActiveSkuViaManager(): void
+    {
+        $this->manager->syncActiveSkus(['MGR_X', 'MGR_Y']);
+        $this->manager->removeActiveSku('MGR_X');
+        $active = $this->manager->getActiveSkus();
+        $this->assertTrue($active['success']);
+        $this->assertNotContains('MGR_X', $active['data']);
+        $this->assertContains('MGR_Y', $active['data']);
+    }
+
+    /**
+     * 完整的活动流程：上架、售卖、下架
+     */
+    public function testFullActiveSkuLifecycle(): void
+    {
+        $sku = 'LIFECYCLE_SKU';
+        // 1. 初始化库存但不激活 -> 无法购买
+        $this->manager->initStocks([$sku => 3]);
+        $result1 = $this->manager->purchase($sku, 'U1', 1, 100, 'ORDER_LC1');
+        $this->assertFalse($result1['success']);
+        $this->assertStringContainsString('不可售', $result1['message']);
+
+        // 2. 激活 SKU -> 可购买
+        $this->manager->syncActiveSkus([$sku]);
+        $result2 = $this->manager->purchase($sku, 'U1', 1, 100, 'ORDER_LC1');
+        $this->assertTrue($result2['success']);
+
+        // 3. 临时下架（移除活跃） -> 无法继续购买，但库存不变
+        $this->manager->removeActiveSku($sku);
+        $result3 = $this->manager->purchase($sku, 'U1', 1, 100, 'ORDER_LC2');
+        $this->assertFalse($result3['success']);
+        $stock = $this->manager->getStock($sku);
+        $this->assertEquals(2, $stock['data']['stock']); // 之前卖出1件，剩2件
+
+        // 4. 重新上架 -> 可继续购买
+        $this->manager->syncActiveSkus([$sku]);
+        $result4 = $this->manager->purchase($sku, 'U1', 1, 100, 'ORDER_LC2');
+        $this->assertTrue($result4['success']);
+        $stockAfter = $this->manager->getStock($sku);
+        $this->assertEquals(1, $stockAfter['data']['stock']);
     }
 }

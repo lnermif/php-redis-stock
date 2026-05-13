@@ -458,4 +458,75 @@ class RedisStockTest extends TestCase
         $this->assertFalse($res['is_sold_out']);
         $this->assertTrue($res['consistency']);
     }
+
+    // =========================================================================
+// 7. 活跃 SKU 管理测试
+// =========================================================================
+
+    public function testIsSkuActiveReturnsFalseForUnknownSku(): void
+    {
+        $this->assertFalse($this->stockManager->isSkuActive('UNKNOWN_SKU'));
+    }
+
+    public function testSyncAndGetActiveSkus(): void
+    {
+        // 初始状态为空
+        $this->assertEmpty($this->stockManager->getActiveSkus());
+
+        // 同步一批 SKU
+        $skus = ['SKU_A', 'SKU_B', 'SKU_C'];
+        $this->stockManager->syncActiveSkus($skus);
+        $active = $this->stockManager->getActiveSkus();
+        // 顺序不重要，只比较值
+        sort($active);
+        sort($skus);
+        $this->assertEquals($skus, $active);
+
+        // 每个 SKU 都应被标记为活跃
+        $this->assertTrue($this->stockManager->isSkuActive('SKU_A'));
+        $this->assertTrue($this->stockManager->isSkuActive('SKU_B'));
+        $this->assertTrue($this->stockManager->isSkuActive('SKU_C'));
+    }
+
+    public function testSyncActiveSkusOverwritesPreviousSet(): void
+    {
+        $this->stockManager->syncActiveSkus(['OLD_A', 'OLD_B']);
+        $this->stockManager->syncActiveSkus(['NEW_X', 'NEW_Y']);
+
+        $active = $this->stockManager->getActiveSkus();
+        $this->assertContains('NEW_X', $active);
+        $this->assertContains('NEW_Y', $active);
+        $this->assertNotContains('OLD_A', $active);
+        $this->assertNotContains('OLD_B', $active);
+    }
+
+    public function testSyncActiveSkusWithEmptyArrayClearsSet(): void
+    {
+        $this->stockManager->syncActiveSkus(['TMP']);
+        $this->assertNotEmpty($this->stockManager->getActiveSkus());
+
+        $this->stockManager->syncActiveSkus([]);
+        $this->assertEmpty($this->stockManager->getActiveSkus());
+    }
+
+    public function testRemoveActiveSku(): void
+    {
+        $this->stockManager->syncActiveSkus(['R1', 'R2', 'R3']);
+
+        $this->stockManager->removeActiveSku('R2');
+        $this->assertTrue($this->stockManager->isSkuActive('R1'));
+        $this->assertFalse($this->stockManager->isSkuActive('R2'));
+        $this->assertTrue($this->stockManager->isSkuActive('R3'));
+
+        // 移除不存在的 SKU 应无副作用
+        $this->stockManager->removeActiveSku('NOT_THERE');
+        $this->assertTrue($this->stockManager->isSkuActive('R1'));
+    }
+
+    public function testRemoveActiveSkuOnEmptySetDoesNotFail(): void
+    {
+        // 集合本身不存在时，remove 操作也不应抛错
+        $this->stockManager->removeActiveSku('GHOST');
+        $this->assertFalse($this->stockManager->isSkuActive('GHOST'));
+    }
 }
