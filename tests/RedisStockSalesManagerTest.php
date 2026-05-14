@@ -242,7 +242,7 @@ class RedisStockSalesManagerTest extends TestCase
     // 4. 辅助操作测试
     // -------------------------------------------------------------------------
 
-    public function testInitStocksAndAddStock(): void
+    public function testInitStocksAndIncrStock(): void
     {
         $sku = 'SKU_INIT';
         $initResult = $this->manager->initStocks([$sku => 10]);
@@ -251,12 +251,12 @@ class RedisStockSalesManagerTest extends TestCase
         $stock = $this->manager->getStock($sku);
         $this->assertEquals(10, $stock['data']['stock']);
 
-        $addResult = $this->manager->addStock($sku, 5);
+        $addResult = $this->manager->incrStock($sku, 5);
         $this->assertTrue($addResult['success']);
         $this->assertEquals(15, $addResult['data']['remain']);
 
         // 对未初始化的 SKU 补货
-        $addGhost = $this->manager->addStock('SKU_GHOST', 5);
+        $addGhost = $this->manager->incrStock('SKU_GHOST', 5);
         $this->assertFalse($addGhost['success']);
         $this->assertEquals(StockSalesCodes::CODE_ERR_NOT_EXISTS, $addGhost['code']);
     }
@@ -268,7 +268,7 @@ class RedisStockSalesManagerTest extends TestCase
         $result = $this->manager->isSoldOut($sku);
         $this->assertTrue($result['data']['soldOut']);
 
-        $this->manager->addStock($sku, 1);
+        $this->manager->incrStock($sku, 1);
         $result2 = $this->manager->isSoldOut($sku);
         $this->assertFalse($result2['data']['soldOut']);
     }
@@ -307,7 +307,7 @@ class RedisStockSalesManagerTest extends TestCase
 
         $methods = [
             'purchase' => ['ERR_TEST', 'U1', 5, 100, 'O1'],
-            'addStock' => ['GHOST', 5],
+            'incrStock' => ['GHOST', 5],
             'cancel' => ['ERR_TEST', 1, 100, 'O_NO'],
         ];
 
@@ -315,8 +315,8 @@ class RedisStockSalesManagerTest extends TestCase
         $purchaseRes = $this->manager->purchase($sku, 'U1', 5, 100, 'O_INS');
         $this->assertFalse($purchaseRes['success']);
 
-        // addStock 未初始化
-        $addRes = $this->manager->addStock('GHOST', 5);
+        // incrStock 未初始化
+        $addRes = $this->manager->incrStock('GHOST', 5);
         $this->assertFalse($addRes['success']);
 
         // cancel 未处理订单
@@ -442,5 +442,63 @@ class RedisStockSalesManagerTest extends TestCase
         $this->assertTrue($result4['success']);
         $stockAfter = $this->manager->getStock($sku);
         $this->assertEquals(1, $stockAfter['data']['stock']);
+    }
+
+    public function testDecrStockSuccess(): void
+    {
+        $sku = 'SKU_DECR_OK';
+        $this->manager->initStocks([$sku => 10]);
+
+        $result = $this->manager->decrStock($sku, 3);
+        $this->assertTrue($result['success']);
+        $this->assertEquals(StockSalesCodes::CODE_SUCCESS, $result['code']);
+        $this->assertEquals(7, $result['data']['remain']);
+
+        $stock = $this->manager->getStock($sku);
+        $this->assertEquals(7, $stock['data']['stock']);
+    }
+
+    public function testDecrStockInsufficient(): void
+    {
+        $sku = 'SKU_DECR_LOW';
+        $this->manager->initStocks([$sku => 2]);
+
+        $result = $this->manager->decrStock($sku, 5);
+        $this->assertFalse($result['success']);
+        $this->assertEquals(StockSalesCodes::CODE_ERR_INSUFFICIENT, $result['code']);
+        $this->assertEquals(2, $result['data']['remain']);
+        $this->assertStringContainsString('库存不足', $result['message']);
+    }
+
+    public function testDecrStockNotInitialized(): void
+    {
+        $result = $this->manager->decrStock('SKU_NOT_EXIST', 3);
+        $this->assertFalse($result['success']);
+        $this->assertEquals(StockSalesCodes::CODE_ERR_NOT_EXISTS, $result['code']);
+        $this->assertNull($result['data']['remain']);
+    }
+
+    public function testDecrStockInvalidSku(): void
+    {
+        $result = $this->manager->decrStock('sku:bad', 1);
+        $this->assertFalse($result['success']);
+        $this->assertEquals(StockSalesCodes::CODE_ERR_INVALID_QUANTITY, $result['code']);
+    }
+
+    public function testDecrStockZeroOrNegativeQuantity(): void
+    {
+        $sku = 'SKU_DECR_ZERO';
+        $this->manager->initStocks([$sku => 5]);
+        $this->assertFalse($this->manager->decrStock($sku, 0)['success']);
+        $this->assertFalse($this->manager->decrStock($sku, -3)['success']);
+    }
+
+    public function testDecrStockWorksWhenSkuInactive(): void
+    {
+        $sku = 'SKU_DECR_INACTIVE';
+        $this->manager->initStocks([$sku => 10]);
+        $result = $this->manager->decrStock($sku, 4);
+        $this->assertTrue($result['success']);
+        $this->assertEquals(6, $result['data']['remain']);
     }
 }

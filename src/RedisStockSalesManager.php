@@ -234,7 +234,7 @@ class RedisStockSalesManager implements StockSalesCodes
      *   'data'    => ['remain' => int|null] // 增加后的库存；若库存未初始化则返回 null
      * ]
      */
-    public function addStock(string $sku, int $quantity): array
+    public function incrStock(string $sku, int $quantity): array
     {
         if (!$this->isValidId($sku)) {
             return $this->response(self::CODE_ERR_INVALID_QUANTITY, 'SKU 包含非法字符');
@@ -242,6 +242,44 @@ class RedisStockSalesManager implements StockSalesCodes
         $res = $this->stockManager->incrStock($sku, $quantity);
         $code = $res['code'] ?? self::CODE_ERR_REDIS_UNAVAILABLE;
         $message = ($code === self::CODE_SUCCESS) ? '增加库存成功' : '增加库存失败';
+
+        return $this->response($code, $message, [
+            'remain' => $res['remain'] ?? null,
+        ]);
+    }
+
+    /**
+     * 减少库存（手动调整，不受活动状态限制）
+     *
+     * @param string $sku 商品 SKU
+     * @param int $quantity 减少数量（> 0）
+     * @return array ['success' => bool, 'code' => int, 'message' => string, 'data' => ['remain' => int|null]]
+     */
+    public function decrStock(string $sku, int $quantity): array
+    {
+        if (!$this->isValidId($sku)) {
+            return $this->response(self::CODE_ERR_INVALID_QUANTITY, 'SKU 包含非法字符');
+        }
+        if ($quantity <= 0) {
+            return $this->response(self::CODE_ERR_INVALID_QUANTITY, '减少数量必须大于 0');
+        }
+
+        $res = $this->stockManager->decrStock($sku, $quantity);
+        $code = $res['code'] ?? self::CODE_ERR_REDIS_UNAVAILABLE;
+
+        switch ($code) {
+            case self::CODE_SUCCESS:
+                $message = '减少库存成功';
+                break;
+            case self::CODE_ERR_INSUFFICIENT:
+                $message = "库存不足，当前剩余 {$res['remain']} 件";
+                break;
+            case self::CODE_ERR_NOT_EXISTS:
+                $message = '商品库存未初始化';
+                break;
+            default:
+                $message = '减少库存失败';
+        }
 
         return $this->response($code, $message, [
             'remain' => $res['remain'] ?? null,
