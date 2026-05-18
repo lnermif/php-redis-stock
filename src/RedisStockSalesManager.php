@@ -28,17 +28,22 @@ class RedisStockSalesManager implements StockSalesCodes
     /** @var RedisSales */
     private $salesManager;
 
+    /** @var RedisToDatabaseSync|null 数据库同步器 */
+    private $sync;
+
     /**
      * @param \Redis $redis 已连接的 Redis 实例
      * @param string $keyPrefix Key 前缀，强烈建议包含 Hash Tag（如 "{product:stock}:"）
      * @param LoggerInterface|null $logger PSR-3 日志记录器
      * @param int|null $maxRetries 最大重试次数，null 则使用默认值
+     * @param DatabaseSyncInterface|null $dbSync 数据库同步实现，传入后在 purchase/cancel 成功后自动同步
      */
     public function __construct(
-        \Redis           $redis,
-        string           $keyPrefix = '{product:stock}:',
-        ?LoggerInterface $logger = null,
-        ?int             $maxRetries = null
+        \Redis                   $redis,
+        string                   $keyPrefix = '{product:stock}:',
+        ?LoggerInterface         $logger = null,
+        ?int                     $maxRetries = null,
+        ?DatabaseSyncInterface   $dbSync = null
     )
     {
         // 验证连接状态（兼容不同版本 PhpRedis）
@@ -49,6 +54,9 @@ class RedisStockSalesManager implements StockSalesCodes
         }
         $this->stockManager = new RedisStock($redis, $keyPrefix, $logger, $maxRetries);
         $this->salesManager = new RedisSales($redis, $keyPrefix, $logger, $maxRetries);
+        if ($dbSync !== null) {
+            $this->sync = new RedisToDatabaseSync($this->stockManager, $this->salesManager, $dbSync, $logger);
+        }
     }
 
     // ---------- 统一响应构造 ----------
@@ -145,6 +153,10 @@ class RedisStockSalesManager implements StockSalesCodes
             'remaining_limit' => $result['remaining_limit'] ?? null,
         ];
 
+        if ($code === self::CODE_SUCCESS && $this->sync !== null) {
+            $this->sync->syncBySku($sku);
+        }
+
         return $this->response($code, $message, $data);
     }
 
@@ -188,6 +200,10 @@ class RedisStockSalesManager implements StockSalesCodes
             'order_id' => $orderId,
             'remain' => $result['remain'] ?? null,
         ];
+
+        if ($code === self::CODE_SUCCESS && $this->sync !== null) {
+            $this->sync->syncBySku($sku);
+        }
 
         return $this->response($code, $message, $data);
     }
@@ -464,5 +480,25 @@ class RedisStockSalesManager implements StockSalesCodes
         } catch (\RuntimeException $e) {
             return $this->response(self::CODE_ERR_REDIS_UNAVAILABLE, '移除失败：' . $e->getMessage());
         }
+    }
+
+    /**
+     * 获取底层库存管理器（供数据库同步服务使用）
+     *
+     * @return RedisStock
+     */
+    public function getStockManager(): RedisStock
+    {
+        return $this->stockManager;
+    }
+
+    /**
+     * 获取底层销售管理器（供数据库同步服务使用）
+     *
+     * @return RedisSales
+     */
+    public function getSalesManager(): RedisSales
+    {
+        return $this->salesManager;
     }
 }
