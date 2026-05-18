@@ -450,7 +450,7 @@ LUA,
 
         $remain = $this->execLuaWithRetry('incr', $keys, $args);
 
-        if ($remain === self::CODE_ERR_NOT_EXISTS) {
+        if ((int)$remain === self::CODE_ERR_NOT_EXISTS) {
             $this->log(LogLevel::WARNING, 'Stock increment failed: not exists', ['sku' => $sku]);
             return [
                 'code' => self::CODE_ERR_NOT_EXISTS,
@@ -713,7 +713,7 @@ LUA,
      */
     public function isSkuActive(string $sku): bool
     {
-        return (bool) $this->readWithRetry(function ($redis) use ($sku) {
+        return (bool)$this->readWithRetry(function ($redis) use ($sku) {
             $key = $this->keyPrefix . RedisConstants::ACTIVE_SKUS_KEY;
             return $redis->sIsMember($key, $sku);
         });

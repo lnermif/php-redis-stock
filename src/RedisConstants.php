@@ -41,32 +41,37 @@ final class RedisConstants
     public const CODE_ERR_ORDER_NOT_PROCESSED = -9;
 
     // -------------------------------------------------------------------------
-    // Key 后缀（用于拼接完整 Key）
+    // Key 后缀 / 前缀（拼接约定见注释，prefix 指 $keyPrefix，自带尾冒号）
     // -------------------------------------------------------------------------
-    /** 售罄标记后缀 */
+
+    /** 售罄标记后缀（拼在 SKU 后，需前导冒号，示例：{prefix}SKU:soldout） */
     public const SOLD_OUT_SUFFIX = ':soldout';
-    /** 用户购买记录 Hash 后缀 */
+
+    /** 用户购买记录 Hash 后缀（拼在 SKU 后，示例：{prefix}SKU:user_bought） */
     public const USER_BOUGHT_HASH_SUFFIX = ':user_bought';
-    /** 商品销量统计 String 后缀 */
+
+    /** 商品销量统计 String 后缀（拼在 SKU 后，示例：{prefix}SKU:sales_count） */
     public const SALES_COUNT_SUFFIX = ':sales_count';
-    /** 商品销售额统计 String 后缀 */
+
+    /** 商品销售额统计 String 后缀（拼在 SKU 后，示例：{prefix}SKU:sales_amount） */
     public const SALES_AMOUNT_SUFFIX = ':sales_amount';
-    /** 销量排行榜 ZSet 后缀 */
-    public const LEADERBOARD_COUNT_SUFFIX = ':leaderboard:count';
-    /** 销售额排行榜 ZSet 后缀 */
-    public const LEADERBOARD_AMOUNT_SUFFIX = ':leaderboard:amount';
-    /** 用户购买集合 Key 前缀（独立于业务前缀，如 user:{userId}:purchased） */
+
+    /** 销量排行榜 ZSet 后缀（直接拼在 prefix 后，不带前导冒号，示例：{prefix}leaderboard:count） */
+    public const LEADERBOARD_COUNT_SUFFIX = 'leaderboard:count';
+
+    /** 销售额排行榜 ZSet 后缀（直接拼在 prefix 后，示例：{prefix}leaderboard:amount） */
+    public const LEADERBOARD_AMOUNT_SUFFIX = 'leaderboard:amount';
+
+    /** 用户购买集合 Key 前缀（拼在 prefix 后，需尾冒号，示例：{prefix}user:userId:purchased） */
     public const USER_PURCHASED_SET_PREFIX = 'user:';
-    /** 订单幂等标记 Key 前缀 */
+
+    /** 订单幂等标记 Key 前缀（示例：{prefix}order:orderId） */
     public const ORDER_IDEMPOTENT_PREFIX = 'order:';
-    /** 订单取消标记后缀（配合并发场景做幂等） */
+
+    /** 订单取消标记后缀（拼在 order key 后，示例：{prefix}order:orderId:canceled） */
     public const ORDER_CANCELED_SUFFIX = ':canceled';
 
-    /**
-     * 活跃 SKU 集合 Key 后缀
-     * 用于管理当前参与活动的 SKU 列表
-     * 完整 Key：{product:stock}:active:skus
-     */
+    /** 活跃 SKU 集合 Key 后缀（直接拼在 prefix 后，示例：{prefix}active:skus） */
     public const ACTIVE_SKUS_KEY = 'active:skus';
 
     // -------------------------------------------------------------------------

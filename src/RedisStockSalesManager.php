@@ -424,6 +424,8 @@ class RedisStockSalesManager implements StockSalesCodes
      *
      * @param array $skus 字符串 SKU 列表
      * @return array ['success' => bool, 'code' => int, 'message' => string, 'data' => null]
+     *                成功时 success=true, data 为 null
+     *                失败时 success=false, code=CODE_ERR_REDIS_UNAVAILABLE
      */
     public function syncActiveSkus(array $skus): array
     {
