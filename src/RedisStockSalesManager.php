@@ -453,6 +453,22 @@ class RedisStockSalesManager implements StockSalesCodes
     }
 
     /**
+     * 增量添加活跃 SKU（不清空现有）
+     *
+     * @param array $skus 要添加的 SKU 列表
+     * @return array ['success' => bool, 'code' => int, 'message' => string]
+     */
+    public function addActiveSkus(array $skus): array
+    {
+        try {
+            $this->stockManager->addActiveSkus($skus);
+            return $this->response(self::CODE_SUCCESS, '添加成功');
+        } catch (\RuntimeException $e) {
+            return $this->response(self::CODE_ERR_REDIS_UNAVAILABLE, '添加失败：' . $e->getMessage());
+        }
+    }
+
+    /**
      * 将指定 SKU 移出活跃集合（使其不可售）
      *
      * @param string $sku

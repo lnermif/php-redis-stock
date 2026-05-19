@@ -753,6 +753,26 @@ LUA,
     }
 
     /**
+     * 增量添加活跃 SKU（不清空现有集合）
+     * 适用于多活动/商品并发初始化，只添加属于自己的 SKU，不影响其他 SKU。
+     *
+     * @param array $skus 要添加的 SKU 列表
+     * @return void
+     * @throws \RuntimeException 写入失败时抛出
+     */
+    public function addActiveSkus(array $skus): void
+    {
+        if (empty($skus)) {
+            return;
+        }
+        $key = $this->keyPrefix . RedisConstants::ACTIVE_SKUS_KEY;
+        $this->writeWithRetry(function ($redis) use ($key, $skus) {
+            // 使用 sAddArray 批量添加，避免循环
+            $redis->sAddArray($key, $skus);
+        });
+    }
+
+    /**
      * 从活跃 SKU 集合中移除指定 SKU
      * 若该 SKU 本来就不在集合中，操作无副作用
      *
