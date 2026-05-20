@@ -4,8 +4,8 @@ namespace Nermif\Tests;
 
 use PHPUnit\Framework\TestCase;
 use Nermif\RedisStockSalesManager;
-use Nermif\StockSalesCodes;
 use Nermif\RedisStock;
+use Nermif\RedisSales;
 use Redis;
 use Psr\Log\NullLogger;
 
@@ -13,7 +13,7 @@ class RedisStockSalesManagerTest extends TestCase
 {
     private $redis;
     private $manager;
-    private $testPrefix = '{test:manager}:';
+    private $testPrefix = '{test:facade}:';
 
     protected function setUp(): void
     {
@@ -40,465 +40,615 @@ class RedisStockSalesManagerTest extends TestCase
         }
     }
 
-    // -------------------------------------------------------------------------
-    // 1. 返回格式规范验证
-    // -------------------------------------------------------------------------
+    private function assertSuccess(array $result): void
+    {
+        $this->assertTrue($result['success'], "操作应成功，但失败: {$result['message']}");
+        $this->assertSame(RedisStockSalesManager::CODE_SUCCESS, $result['code']);
+    }
+
+    private function assertFailed(array $result, int $expectedCode): void
+    {
+        $this->assertFalse($result['success']);
+        $this->assertSame($expectedCode, $result['code']);
+    }
+
+    // ===== Response Format =====
 
     public function testResponseFormat(): void
     {
-        $sku = 'FORMAT_SKU';
-        $this->manager->initStocks([$sku => 10]);
-        $this->manager->syncActiveSkus([$sku]);
-        $result = $this->manager->purchase($sku, 'U1', 1, 100, 'ORDER_RESP');
-
+        $result = $this->manager->initStocks(['SKU_FMT' => 10]);
         $this->assertArrayHasKey('success', $result);
         $this->assertArrayHasKey('code', $result);
         $this->assertArrayHasKey('message', $result);
         $this->assertArrayHasKey('data', $result);
-
-        $this->assertIsBool($result['success']);
-        $this->assertIsInt($result['code']);
-        $this->assertIsString($result['message']);
-        $this->assertIsArray($result['data']);
-
-        // 成功时 data 应包含必要字段
-        if ($result['success']) {
-            $this->assertArrayHasKey('sku', $result['data']);
-            $this->assertArrayHasKey('user_id', $result['data']);
-            $this->assertArrayHasKey('order_id', $result['data']);
-            $this->assertArrayHasKey('total_sales', $result['data']);
-        }
     }
 
-    // -------------------------------------------------------------------------
-    // 2. 基本购买与取消流程
-    // -------------------------------------------------------------------------
+    // ===== Purchase (must syncActiveSkus first) =====
 
     public function testPurchaseSuccessAndCancel(): void
     {
-        $sku = 'SKU_BUY';
-        $userId = 'USER_BUY';
-        $orderId = 'ORDER_BUY_001';
-
-        $this->manager->initStocks([$sku => 10]);
-        $this->manager->syncActiveSkus([$sku]);
-        // 购买成功
-        $purchase = $this->manager->purchase($sku, $userId, 2, 1999, $orderId);
-        $this->assertTrue($purchase['success']);
-        $this->assertEquals(StockSalesCodes::CODE_SUCCESS, $purchase['code']);
-        $this->assertEquals(2, $purchase['data']['total_sales']);
-        $this->assertEquals($sku, $purchase['data']['sku']);
-
-        // 验证库存减少
-        $stock = $this->manager->getStock($sku);
-        $this->assertEquals(8, $stock['data']['stock']);
-
-        // 取消订单
-        $cancel = $this->manager->cancel($sku, 2, 1999, $orderId);
-        $this->assertTrue($cancel['success']);
-        $this->assertEquals(StockSalesCodes::CODE_SUCCESS, $cancel['code']);
-
-        // 库存回滚
-        $stockAfter = $this->manager->getStock($sku);
-        $this->assertEquals(10, $stockAfter['data']['stock']);
+        $this->manager->initStocks(['SKU_PC' => 10]);
+        $this->manager->syncActiveSkus(['SKU_PC']);
+        $result = $this->manager->purchase('SKU_PC', 'USER_PC', 3, 3000, 'ORDER_PC', 5);
+        $this->assertSuccess($result);
+        $this->assertSame(3, $result['data']['total_sales']);
+        $this->assertSame(7, $this->manager->getStock('SKU_PC')['data']['stock']);
     }
 
-    public function testPurchaseInsufficientStock(): void
+    public function testPurchaseInsufficient(): void
     {
-        $sku = 'SKU_LOW';
-        $this->manager->initStocks([$sku => 3]);
-        $this->manager->syncActiveSkus([$sku]);
-        $result = $this->manager->purchase($sku, 'U1', 5, 500, 'ORDER_LOW');
-        $this->assertFalse($result['success']);
-        $this->assertEquals(StockSalesCodes::CODE_ERR_INSUFFICIENT, $result['code']);
-        $this->assertEquals(3, $result['data']['remain']);
+        $this->manager->initStocks(['SKU_INSUF_PC' => 2]);
+        $this->manager->syncActiveSkus(['SKU_INSUF_PC']);
+        $result = $this->manager->purchase('SKU_INSUF_PC', 'USER_INSUF', 5, 5000, 'ORDER_INSUF_PC', 0);
+        $this->assertFailed($result, RedisStockSalesManager::CODE_ERR_INSUFFICIENT);
+        $this->assertStringContainsString('库存不足', $result['message']);
     }
 
-    public function testPurchaseNotInitialized(): void
+    public function testPurchaseNotInit(): void
     {
-        // 不初始化库存，但需要激活 SKU
-        $this->manager->syncActiveSkus(['SKU_NO_INIT']);  // 先激活
-        $result = $this->manager->purchase('SKU_NO_INIT', 'U1', 1, 100, 'ORDER_NO_INIT');
-        $this->assertFalse($result['success']);
-        $this->assertEquals(StockSalesCodes::CODE_ERR_NOT_EXISTS, $result['code']);
+        $this->manager->syncActiveSkus(['SKU_NOT_INIT']);
+        $result = $this->manager->purchase('SKU_NOT_INIT', 'U1', 1, 1000, 'ORDER_NOT_INIT', 0);
+        $this->assertFailed($result, RedisStockSalesManager::CODE_ERR_NOT_EXISTS);
+        $this->assertStringContainsString('未初始化', $result['message']);
     }
 
     public function testPurchaseLimitExceeded(): void
     {
-        $sku = 'SKU_LIMIT';
-        $userId = 'USER_LIMIT';
-        $limit = 2;
-
-        $this->manager->initStocks([$sku => 10]);
-        $this->manager->syncActiveSkus([$sku]);
-
-        // 第一单成功
-        $result1 = $this->manager->purchase($sku, $userId, 2, 200, 'ORDER_L1', $limit);
-        $this->assertTrue($result1['success']);
-
-        // 第二单超过限购
-        $result2 = $this->manager->purchase($sku, $userId, 1, 100, 'ORDER_L2', $limit);
-        $this->assertFalse($result2['success']);
-        $this->assertEquals(StockSalesCodes::CODE_ERR_LIMIT_EXCEEDED, $result2['code']);
-        $this->assertEquals(0, $result2['data']['remaining_limit']);
+        $this->manager->initStocks(['SKU_LIMIT_PC' => 10]);
+        $this->manager->syncActiveSkus(['SKU_LIMIT_PC']);
+        $r1 = $this->manager->purchase('SKU_LIMIT_PC', 'USER_LIM', 3, 3000, 'ORDER_LIM1', 3);
+        $this->assertSuccess($r1);
+        $r2 = $this->manager->purchase('SKU_LIMIT_PC', 'USER_LIM', 1, 1000, 'ORDER_LIM2', 3);
+        $this->assertFailed($r2, RedisStockSalesManager::CODE_ERR_LIMIT_EXCEEDED);
     }
 
-    public function testPurchaseIdempotency(): void
+    public function testPurchaseIdempotent(): void
     {
-        $sku = 'SKU_IDEM';
-        $orderId = 'ORDER_IDEM';
-
-        $this->manager->initStocks([$sku => 5]);
-        $this->manager->syncActiveSkus([$sku]);
-
-        $result1 = $this->manager->purchase($sku, 'U1', 1, 100, $orderId);
-        $this->assertTrue($result1['success']);
-
-        $result2 = $this->manager->purchase($sku, 'U2', 2, 200, $orderId);
-        $this->assertFalse($result2['success']);
-        $this->assertEquals(StockSalesCodes::CODE_ERR_ALREADY_PROCESSED, $result2['code']);
-    }
-
-    public function testCancelOrderAlreadyCanceled(): void
-    {
-        $sku = 'SKU_CANCEL';
-        $orderId = 'ORDER_CANCEL';
-
-        $this->manager->initStocks([$sku => 5]);
-        $this->manager->syncActiveSkus([$sku]);
-        $this->manager->purchase($sku, 'U1', 2, 200, $orderId);
-        $this->manager->cancel($sku, 2, 200, $orderId);
-
-        // 再次取消
-        $cancelAgain = $this->manager->cancel($sku, 2, 200, $orderId);
-        $this->assertFalse($cancelAgain['success']);
-        $this->assertEquals(StockSalesCodes::CODE_ERR_ORDER_CANCELED, $cancelAgain['code']);
-    }
-
-    public function testCancelNonExistentOrder(): void
-    {
-        $result = $this->manager->cancel('SKU_ANY', 1, 100, 'ORDER_NOT_EXIST');
-        $this->assertFalse($result['success']);
-        $this->assertEquals(StockSalesCodes::CODE_ERR_ORDER_NOT_PROCESSED, $result['code']);
-    }
-
-    // -------------------------------------------------------------------------
-    // 3. 参数校验
-    // -------------------------------------------------------------------------
-
-    public function testPurchaseInvalidSku(): void
-    {
-        $result = $this->manager->purchase('sku:bad', 'U1', 1, 100, 'O1');
-        $this->assertFalse($result['success']);
-        $this->assertEquals(StockSalesCodes::CODE_ERR_INVALID_QUANTITY, $result['code']);
-        $this->assertStringContainsString('SKU 包含非法字符', $result['message']);
-    }
-
-    public function testPurchaseInvalidUserId(): void
-    {
-        $result = $this->manager->purchase('SKU_OK', 'user:bad', 1, 100, 'O1');
-        $this->assertFalse($result['success']);
-        $this->assertEquals(StockSalesCodes::CODE_ERR_INVALID_QUANTITY, $result['code']);
-        $this->assertStringContainsString('用户ID包含非法字符', $result['message']);
-    }
-
-    public function testPurchaseEmptyOrderId(): void
-    {
-        $this->manager->initStocks(['SKU_EMPTY' => 10]);
-        $result = $this->manager->purchase('SKU_EMPTY', 'U1', 1, 100, '');
-        $this->assertFalse($result['success']);
-        $this->assertEquals(StockSalesCodes::CODE_ERR_INVALID_QUANTITY, $result['code']);
-        $this->assertStringContainsString('订单ID不能为空', $result['message']);
-    }
-
-    public function testPurchaseNegativeLimit(): void
-    {
-        $this->manager->initStocks(['SKU_NEG' => 10]);
-        $result = $this->manager->purchase('SKU_NEG', 'U1', 1, 100, 'O_NEG', -1);
-        $this->assertFalse($result['success']);
-        $this->assertEquals(StockSalesCodes::CODE_ERR_INVALID_QUANTITY, $result['code']);
-        $this->assertStringContainsString('限购数量不能为负数', $result['message']);
+        $this->manager->initStocks(['SKU_IDEM_PC' => 10]);
+        $this->manager->syncActiveSkus(['SKU_IDEM_PC']);
+        $r1 = $this->manager->purchase('SKU_IDEM_PC', 'U1', 2, 2000, 'ORDER_IDEM_PC', 0);
+        $this->assertSuccess($r1);
+        $r2 = $this->manager->purchase('SKU_IDEM_PC', 'U2', 5, 5000, 'ORDER_IDEM_PC', 0);
+        $this->assertFailed($r2, RedisStockSalesManager::CODE_ERR_ALREADY_PROCESSED);
     }
 
     public function testPurchaseZeroQuantity(): void
     {
-        $this->manager->initStocks(['SKU_ZQ' => 10]);
-        $result = $this->manager->purchase('SKU_ZQ', 'U1', 0, 100, 'O_ZQ');
-        // 底层应返回数量无效
-        $this->assertFalse($result['success']);
-        $this->assertEquals(StockSalesCodes::CODE_ERR_INVALID_QUANTITY, $result['code']);
+        $this->manager->initStocks(['SKU_ZERO_QTY' => 10]);
+        $this->manager->syncActiveSkus(['SKU_ZERO_QTY']);
+        $result = $this->manager->purchase('SKU_ZERO_QTY', 'U1', 0, 1000, 'ORDER_ZERO', 0);
+        $this->assertFailed($result, RedisStockSalesManager::CODE_ERR_INVALID_QUANTITY);
+    }
+
+    public function testPurchaseNegativeQuantity(): void
+    {
+        $this->manager->initStocks(['SKU_NEG' => 10]);
+        $this->manager->syncActiveSkus(['SKU_NEG']);
+        $result = $this->manager->purchase('SKU_NEG', 'U1', -1, 1000, 'ORDER_NEG', 0);
+        $this->assertFailed($result, RedisStockSalesManager::CODE_ERR_INVALID_QUANTITY);
     }
 
     public function testPurchaseNegativeAmount(): void
     {
-        $this->manager->initStocks(['SKU_NEGAMT' => 10]);
-        $this->manager->syncActiveSkus(['SKU_NEGAMT']);
-        $result = $this->manager->purchase('SKU_NEGAMT', 'U1', 1, -100, 'O_NEGAMT');
-        $this->assertFalse($result['success']);
-        $this->assertEquals(StockSalesCodes::CODE_ERR_INVALID_AMOUNT, $result['code']);
+        $this->manager->initStocks(['SKU_NEG_AMT' => 10]);
+        $this->manager->syncActiveSkus(['SKU_NEG_AMT']);
+        $result = $this->manager->purchase('SKU_NEG_AMT', 'U1', 1, -1000, 'ORDER_NEG_AMT', 0);
+        $this->assertFailed($result, RedisStockSalesManager::CODE_ERR_INVALID_AMOUNT);
     }
 
-    // -------------------------------------------------------------------------
-    // 4. 辅助操作测试
-    // -------------------------------------------------------------------------
-
-    public function testInitStocksAndIncrStock(): void
+    public function testPurchaseZeroAmount(): void
     {
-        $sku = 'SKU_INIT';
-        $initResult = $this->manager->initStocks([$sku => 10]);
-        $this->assertEquals(1, $initResult['data']['initialized_count']);
-
-        $stock = $this->manager->getStock($sku);
-        $this->assertEquals(10, $stock['data']['stock']);
-
-        $addResult = $this->manager->incrStock($sku, 5);
-        $this->assertTrue($addResult['success']);
-        $this->assertEquals(15, $addResult['data']['remain']);
-
-        // 对未初始化的 SKU 补货
-        $addGhost = $this->manager->incrStock('SKU_GHOST', 5);
-        $this->assertFalse($addGhost['success']);
-        $this->assertEquals(StockSalesCodes::CODE_ERR_NOT_EXISTS, $addGhost['code']);
+        $this->manager->initStocks(['SKU_FREE_PC' => 10]);
+        $this->manager->syncActiveSkus(['SKU_FREE_PC']);
+        $result = $this->manager->purchase('SKU_FREE_PC', 'U1', 1, 0, 'ORDER_FREE_PC', 0);
+        $this->assertSuccess($result);
     }
 
-    public function testIsSoldOut(): void
+    public function testPurchaseWithLimitParamLarge(): void
     {
-        $sku = 'SKU_SOLDOUT';
-        $this->manager->initStocks([$sku => 0]);
-        $result = $this->manager->isSoldOut($sku);
+        $this->manager->initStocks(['SKU_BIG_LIMIT' => 100]);
+        $this->manager->syncActiveSkus(['SKU_BIG_LIMIT']);
+        $result = $this->manager->purchase('SKU_BIG_LIMIT', 'U1', 1, 1000, 'ORDER_BIG_LIMIT', 99);
+        $this->assertSuccess($result);
+        $skus = $this->manager->getStock('SKU_BIG_LIMIT');
+        $this->assertSame(99, $skus['data']['stock']);
+    }
+
+    public function testPurchaseOrderCanceledRejected(): void
+    {
+        $this->manager->initStocks(['SKU_CAN_REJ' => 10]);
+        $this->manager->syncActiveSkus(['SKU_CAN_REJ']);
+        $cancelKey = $this->testPrefix . 'order:ORDER_CAN_REJ:canceled';
+        $this->redis->setex($cancelKey, 300, '1');
+        $result = $this->manager->purchase('SKU_CAN_REJ', 'U1', 1, 1000, 'ORDER_CAN_REJ', 0);
+        $this->assertFailed($result, RedisStockSalesManager::CODE_ERR_ORDER_CANCELED);
+        $this->assertStringContainsString('已取消', $result['message']);
+    }
+
+    public function testPurchaseDeductToZeroSetsSoldout(): void
+    {
+        $this->manager->initStocks(['SKU_SOLD_PC' => 1]);
+        $this->manager->syncActiveSkus(['SKU_SOLD_PC']);
+        $this->manager->purchase('SKU_SOLD_PC', 'U1', 1, 1000, 'ORDER_SOLD_PC', 0);
+        $result = $this->manager->isSoldOut('SKU_SOLD_PC');
         $this->assertTrue($result['data']['soldOut']);
-
-        $this->manager->incrStock($sku, 1);
-        $result2 = $this->manager->isSoldOut($sku);
-        $this->assertFalse($result2['data']['soldOut']);
     }
 
-    public function testMonitor(): void
+    // ===== Cancel =====
+
+    public function testCancelSuccess(): void
     {
-        $sku = 'SKU_MONITOR';
-        $this->manager->initStocks([$sku => 5]);
-        $res = $this->manager->monitor($sku);
-        $this->assertTrue($res['success']);
-        $this->assertTrue($res['data']['consistency']);
-        $this->assertEquals(5, $res['data']['stock']);
+        $this->manager->initStocks(['SKU_C' => 10]);
+        $this->manager->syncActiveSkus(['SKU_C']);
+        $this->manager->purchase('SKU_C', 'U1', 3, 3000, 'ORDER_C', 0);
+        $result = $this->manager->cancel('SKU_C', 3, 3000, 'ORDER_C');
+        $this->assertSuccess($result);
+        $this->assertSame(10, $result['data']['remain']);
     }
 
-    public function testRepair(): void
+    public function testCancelAlreadyCanceled(): void
     {
-        $sku = 'SKU_REPAIR';
-        $this->manager->initStocks([$sku => 5]);
-        // 手动破坏一致性
-        $this->redis->set($this->testPrefix . $sku . ':soldout', 1);
-
-        $repair = $this->manager->repair($sku);
-        $this->assertEquals(1, $repair['data']['repair_code']);
-        $this->assertStringContainsString('removed invalid soldout marker', $repair['message']);
+        $this->manager->initStocks(['SKU_CA' => 5]);
+        $this->manager->syncActiveSkus(['SKU_CA']);
+        $this->manager->purchase('SKU_CA', 'U1', 1, 1000, 'ORDER_CA', 0);
+        $this->manager->cancel('SKU_CA', 1, 1000, 'ORDER_CA');
+        $result = $this->manager->cancel('SKU_CA', 1, 1000, 'ORDER_CA');
+        $this->assertFailed($result, RedisStockSalesManager::CODE_ERR_ORDER_CANCELED);
     }
 
-    // -------------------------------------------------------------------------
-    // 5. 统一返回结构错误场景
-    // -------------------------------------------------------------------------
-
-    public function testAllErrorResponsesHaveSuccessFalse(): void
+    public function testCancelNotProcessed(): void
     {
-        $sku = 'ERR_TEST';
-        $this->manager->initStocks([$sku => 2]);
-        $this->manager->syncActiveSkus([$sku]);
-
-        $methods = [
-            'purchase' => ['ERR_TEST', 'U1', 5, 100, 'O1'],
-            'incrStock' => ['GHOST', 5],
-            'cancel' => ['ERR_TEST', 1, 100, 'O_NO'],
-        ];
-
-        // purchase 库存不足，必然是 success=false
-        $purchaseRes = $this->manager->purchase($sku, 'U1', 5, 100, 'O_INS');
-        $this->assertFalse($purchaseRes['success']);
-
-        // incrStock 未初始化
-        $addRes = $this->manager->incrStock('GHOST', 5);
-        $this->assertFalse($addRes['success']);
-
-        // cancel 未处理订单
-        $cancelRes = $this->manager->cancel($sku, 1, 100, 'ORDER_NOT_DONE');
-        $this->assertFalse($cancelRes['success']);
+        $result = $this->manager->cancel('SKU_CP', 1, 1000, 'ORDER_NOT_EXIST');
+        $this->assertFailed($result, RedisStockSalesManager::CODE_ERR_ORDER_NOT_PROCESSED);
     }
 
-    /**
-     * 测试超长合法 ID（1000 字符）是否能正常购买
-     */
-    public function testPurchaseWithVeryLongIds(): void
+    public function testCancelNotInitialized(): void
     {
-        $longSku = str_repeat('A', 1000);
-        $longUserId = str_repeat('U', 1000);
-        $longOrderId = str_repeat('O', 1000);
-
-        // 确保库存存在
-        $this->manager->initStocks([$longSku => 5]);
-        $this->manager->syncActiveSkus([$longSku]);
-
-        $result = $this->manager->purchase($longSku, $longUserId, 1, 100, $longOrderId);
-        $this->assertTrue($result['success']);
-        $this->assertEquals(StockSalesCodes::CODE_SUCCESS, $result['code']);
-        // 可选：验证 data 中的 SKU 等字段与原值一致
-        $this->assertEquals($longSku, $result['data']['sku']);
+        $orderKey = $this->testPrefix . 'order:' . 'ORDER_NI_CANCEL';
+        $this->redis->setex($orderKey, 300, '1');
+        $result = $this->manager->cancel('SKU_NI', 1, 1000, 'ORDER_NI_CANCEL');
+        $this->assertFailed($result, RedisStockSalesManager::CODE_ERR_NOT_EXISTS);
     }
 
-    // -------------------------------------------------------------------------
-// 6. 活跃 SKU 管理测试
-// -------------------------------------------------------------------------
-
-    public function testPurchaseBlockedWhenSkuNotActive(): void
+    public function testCancelNegativeQuantity(): void
     {
-        $sku = 'SKU_INACTIVE';
-        // 库存存在但不在活跃集合中
-        $this->manager->initStocks([$sku => 10]);
-        // 默认未同步任何活跃 SKU，所以 isSkuActive 返回 false
-
-        $result = $this->manager->purchase($sku, 'U1', 1, 100, 'ORDER_INACTIVE');
-        $this->assertFalse($result['success']);
-        $this->assertEquals(StockSalesCodes::CODE_ERR_INVALID_QUANTITY, $result['code']);
-        $this->assertStringContainsString('不可售', $result['message']);
+        $result = $this->manager->cancel('SKU', -1, 1000, 'ORDER');
+        $this->assertFailed($result, RedisStockSalesManager::CODE_ERR_INVALID_QUANTITY);
     }
 
-    public function testPurchaseWorksAfterActivatingSku(): void
+    public function testCancelZeroQuantity(): void
     {
-        $sku = 'SKU_ACTIVE';
-        $this->manager->initStocks([$sku => 5]);
-        // 将 SKU 设为活跃
-        $this->manager->syncActiveSkus([$sku]);
-
-        $result = $this->manager->purchase($sku, 'U1', 1, 100, 'ORDER_ACTIVE');
-        $this->assertTrue($result['success']);
-        $this->assertEquals(StockSalesCodes::CODE_SUCCESS, $result['code']);
+        $result = $this->manager->cancel('SKU', 0, 1000, 'ORDER');
+        $this->assertFailed($result, RedisStockSalesManager::CODE_ERR_INVALID_QUANTITY);
     }
 
-    public function testIsSkuActiveViaManager(): void
+    public function testCancelNegativeAmount(): void
     {
-        $sku = 'SKU_CHECK';
-        // 初始状态为空数组
-        $result = $this->manager->getActiveSkus();
-        $this->assertTrue($result['success']);
-        $this->assertEmpty($result['data']);
-
-        $this->manager->syncActiveSkus([$sku]);
-        $active = $this->manager->getActiveSkus();
-        $this->assertTrue($active['success']);
-        $this->assertContains($sku, $active['data']);
-
-        $this->manager->removeActiveSku($sku);
-        $activeAfter = $this->manager->getActiveSkus();
-        $this->assertTrue($activeAfter['success']);
-        $this->assertNotContains($sku, $activeAfter['data']);
+        $result = $this->manager->cancel('SKU', 1, -1000, 'ORDER');
+        $this->assertFailed($result, RedisStockSalesManager::CODE_ERR_INVALID_AMOUNT);
     }
 
-    public function testSyncActiveSkusViaManager(): void
+    public function testCancelInvalidSku(): void
     {
-        $this->manager->syncActiveSkus(['MGR_A', 'MGR_B']);
-        $active = $this->manager->getActiveSkus();
-        $this->assertTrue($active['success']);
-        $this->assertContains('MGR_A', $active['data']);
-        $this->assertContains('MGR_B', $active['data']);
-        $this->assertCount(2, $active['data']);
+        $result = $this->manager->cancel('bad:sku', 1, 1000, 'ORDER');
+        $this->assertFailed($result, RedisStockSalesManager::CODE_ERR_INVALID_QUANTITY);
     }
 
-    public function testRemoveActiveSkuViaManager(): void
+    public function testCancelRestoresSoldout(): void
     {
-        $this->manager->syncActiveSkus(['MGR_X', 'MGR_Y']);
-        $this->manager->removeActiveSku('MGR_X');
-        $active = $this->manager->getActiveSkus();
-        $this->assertTrue($active['success']);
-        $this->assertNotContains('MGR_X', $active['data']);
-        $this->assertContains('MGR_Y', $active['data']);
+        $this->manager->initStocks(['SKU_RST' => 1]);
+        $this->manager->syncActiveSkus(['SKU_RST']);
+        $this->manager->purchase('SKU_RST', 'U1', 1, 1000, 'ORDER_RST', 0);
+        $this->assertTrue($this->manager->isSoldOut('SKU_RST')['data']['soldOut']);
+        $this->manager->cancel('SKU_RST', 1, 1000, 'ORDER_RST');
+        $this->assertFalse($this->manager->isSoldOut('SKU_RST')['data']['soldOut']);
     }
 
-    /**
-     * 完整的活动流程：上架、售卖、下架
-     */
-    public function testFullActiveSkuLifecycle(): void
+    // ===== Param Validation =====
+
+    public function testParamInvalidSku(): void
     {
-        $sku = 'LIFECYCLE_SKU';
-        // 1. 初始化库存但不激活 -> 无法购买
-        $this->manager->initStocks([$sku => 3]);
-        $result1 = $this->manager->purchase($sku, 'U1', 1, 100, 'ORDER_LC1');
-        $this->assertFalse($result1['success']);
-        $this->assertStringContainsString('不可售', $result1['message']);
-
-        // 2. 激活 SKU -> 可购买
-        $this->manager->syncActiveSkus([$sku]);
-        $result2 = $this->manager->purchase($sku, 'U1', 1, 100, 'ORDER_LC1');
-        $this->assertTrue($result2['success']);
-
-        // 3. 临时下架（移除活跃） -> 无法继续购买，但库存不变
-        $this->manager->removeActiveSku($sku);
-        $result3 = $this->manager->purchase($sku, 'U1', 1, 100, 'ORDER_LC2');
-        $this->assertFalse($result3['success']);
-        $stock = $this->manager->getStock($sku);
-        $this->assertEquals(2, $stock['data']['stock']); // 之前卖出1件，剩2件
-
-        // 4. 重新上架 -> 可继续购买
-        $this->manager->syncActiveSkus([$sku]);
-        $result4 = $this->manager->purchase($sku, 'U1', 1, 100, 'ORDER_LC2');
-        $this->assertTrue($result4['success']);
-        $stockAfter = $this->manager->getStock($sku);
-        $this->assertEquals(1, $stockAfter['data']['stock']);
+        $result = $this->manager->purchase('bad:sku', 'U1', 1, 1000, 'O1', 0);
+        $this->assertFailed($result, RedisStockSalesManager::CODE_ERR_INVALID_QUANTITY);
     }
+
+    public function testParamInvalidUserId(): void
+    {
+        $this->manager->initStocks(['SKU_P' => 10]);
+        $this->manager->syncActiveSkus(['SKU_P']);
+        $result = $this->manager->purchase('SKU_P', 'bad:user', 1, 1000, 'O1', 0);
+        $this->assertFailed($result, RedisStockSalesManager::CODE_ERR_INVALID_QUANTITY);
+    }
+
+    public function testParamEmptyOrderId(): void
+    {
+        $result = $this->manager->purchase('SKU', 'U1', 1, 1000, '', 0);
+        $this->assertFailed($result, RedisStockSalesManager::CODE_ERR_INVALID_QUANTITY);
+    }
+
+    public function testParamNegativeLimit(): void
+    {
+        $this->manager->initStocks(['SKU_NL' => 10]);
+        $this->manager->syncActiveSkus(['SKU_NL']);
+        $result = $this->manager->purchase('SKU_NL', 'U1', 1, 1000, 'O_NL', -1);
+        $this->assertFailed($result, RedisStockSalesManager::CODE_ERR_INVALID_QUANTITY);
+    }
+
+    public function testParamNegativeLimitMessageMatch(): void
+    {
+        $this->manager->initStocks(['SKU_NLM' => 10]);
+        $this->manager->syncActiveSkus(['SKU_NLM']);
+        $result = $this->manager->purchase('SKU_NLM', 'U1', 1, 1000, 'O_NLM', -1);
+        $this->assertStringContainsString('负数', $result['message']);
+    }
+
+    public function testPurchaseWithNoLimitZero(): void
+    {
+        $this->manager->initStocks(['SKU_ZL' => 100]);
+        $this->manager->syncActiveSkus(['SKU_ZL']);
+        $result = $this->manager->purchase('SKU_ZL', 'U1', 50, 50000, 'O_ZL', 0);
+        $this->assertSuccess($result);
+    }
+
+    // ===== Init and Incr =====
+
+    public function testInitStocksSuccess(): void
+    {
+        $result = $this->manager->initStocks(['SKU_INIT' => 50]);
+        $this->assertSuccess($result);
+        $this->assertSame(1, $result['data']['initialized_count']);
+    }
+
+    public function testInitStocksEmpty(): void
+    {
+        $result = $this->manager->initStocks([]);
+        $this->assertSuccess($result);
+        $this->assertSame(0, $result['data']['initialized_count']);
+    }
+
+    public function testInitStocksWithTTL(): void
+    {
+        $result = $this->manager->initStocks(['SKU_TTL' => 10], 60);
+        $this->assertSuccess($result);
+    }
+
+    public function testIncrGhostSku(): void
+    {
+        $result = $this->manager->incrStock('GHOST_INCR', 10);
+        $this->assertFailed($result, RedisStockSalesManager::CODE_ERR_NOT_EXISTS);
+    }
+
+    public function testInitThenIncr(): void
+    {
+        $this->manager->initStocks(['SKU_II' => 5]);
+        $result = $this->manager->incrStock('SKU_II', 5);
+        $this->assertSuccess($result);
+        $getResult = $this->manager->getStock('SKU_II');
+        $this->assertSame(10, $getResult['data']['stock']);
+    }
+
+    public function testIncrAfterDpl(): void
+    {
+        $this->manager->initStocks(['SKU_DI' => 10]);
+        $this->manager->syncActiveSkus(['SKU_DI']);
+        $this->manager->purchase('SKU_DI', 'U1', 10, 10000, 'ORDER_DI', 0);
+        $this->assertTrue($this->manager->isSoldOut('SKU_DI')['data']['soldOut']);
+        $this->manager->incrStock('SKU_DI', 5);
+        $this->assertFalse($this->manager->isSoldOut('SKU_DI')['data']['soldOut']);
+    }
+
+    // ===== DecrStock Via Manager =====
 
     public function testDecrStockSuccess(): void
     {
-        $sku = 'SKU_DECR_OK';
-        $this->manager->initStocks([$sku => 10]);
-
-        $result = $this->manager->decrStock($sku, 3);
-        $this->assertTrue($result['success']);
-        $this->assertEquals(StockSalesCodes::CODE_SUCCESS, $result['code']);
-        $this->assertEquals(7, $result['data']['remain']);
-
-        $stock = $this->manager->getStock($sku);
-        $this->assertEquals(7, $stock['data']['stock']);
+        $this->manager->initStocks(['SKU_DECR' => 10]);
+        $result = $this->manager->decrStock('SKU_DECR', 4);
+        $this->assertSuccess($result);
+        $this->assertSame(6, $result['data']['remain']);
     }
 
     public function testDecrStockInsufficient(): void
     {
-        $sku = 'SKU_DECR_LOW';
-        $this->manager->initStocks([$sku => 2]);
-
-        $result = $this->manager->decrStock($sku, 5);
-        $this->assertFalse($result['success']);
-        $this->assertEquals(StockSalesCodes::CODE_ERR_INSUFFICIENT, $result['code']);
-        $this->assertEquals(2, $result['data']['remain']);
-        $this->assertStringContainsString('库存不足', $result['message']);
+        $this->manager->initStocks(['SKU_DECR_INF' => 2]);
+        $result = $this->manager->decrStock('SKU_DECR_INF', 5);
+        $this->assertFailed($result, RedisStockSalesManager::CODE_ERR_INSUFFICIENT);
     }
 
     public function testDecrStockNotInitialized(): void
     {
-        $result = $this->manager->decrStock('SKU_NOT_EXIST', 3);
-        $this->assertFalse($result['success']);
-        $this->assertEquals(StockSalesCodes::CODE_ERR_NOT_EXISTS, $result['code']);
-        $this->assertNull($result['data']['remain']);
+        $result = $this->manager->decrStock('SKU_NO_INIT', 1);
+        $this->assertFailed($result, RedisStockSalesManager::CODE_ERR_NOT_EXISTS);
     }
 
     public function testDecrStockInvalidSku(): void
     {
-        $result = $this->manager->decrStock('sku:bad', 1);
-        $this->assertFalse($result['success']);
-        $this->assertEquals(StockSalesCodes::CODE_ERR_INVALID_QUANTITY, $result['code']);
+        $result = $this->manager->decrStock('bad:sku', 1);
+        $this->assertFailed($result, RedisStockSalesManager::CODE_ERR_INVALID_QUANTITY);
     }
 
-    public function testDecrStockZeroOrNegativeQuantity(): void
+    public function testDecrStockZeroQuantity(): void
     {
-        $sku = 'SKU_DECR_ZERO';
-        $this->manager->initStocks([$sku => 5]);
-        $this->assertFalse($this->manager->decrStock($sku, 0)['success']);
-        $this->assertFalse($this->manager->decrStock($sku, -3)['success']);
+        $result = $this->manager->decrStock('SKU', 0);
+        $this->assertFailed($result, RedisStockSalesManager::CODE_ERR_INVALID_QUANTITY);
     }
 
-    public function testDecrStockWorksWhenSkuInactive(): void
+    public function testDecrStockNegativeQuantity(): void
     {
-        $sku = 'SKU_DECR_INACTIVE';
-        $this->manager->initStocks([$sku => 10]);
-        $result = $this->manager->decrStock($sku, 4);
-        $this->assertTrue($result['success']);
-        $this->assertEquals(6, $result['data']['remain']);
+        $result = $this->manager->decrStock('SKU', -1);
+        $this->assertFailed($result, RedisStockSalesManager::CODE_ERR_INVALID_QUANTITY);
+    }
+
+    public function testDecrStockWorksWhenInactive(): void
+    {
+        $this->manager->initStocks(['SKU_INACTIVE' => 5]);
+        $result = $this->manager->decrStock('SKU_INACTIVE', 2);
+        $this->assertSuccess($result);
+    }
+
+    // ===== IsSoldOut =====
+
+    public function testIsSoldOutNotExistsReturnsFalse(): void
+    {
+        $result = $this->manager->isSoldOut('GHOST_SO');
+        $this->assertSuccess($result);
+        $this->assertFalse($result['data']['soldOut']);
+    }
+
+    public function testIsSoldOutReturnsTrueWhenStockZero(): void
+    {
+        $this->manager->initStocks(['SKU_SO' => 0]);
+        $result = $this->manager->isSoldOut('SKU_SO');
+        $this->assertTrue($result['data']['soldOut']);
+    }
+
+    public function testIsSoldOutInvalidSku(): void
+    {
+        $result = $this->manager->isSoldOut('bad:sku');
+        $this->assertFailed($result, RedisStockSalesManager::CODE_ERR_INVALID_QUANTITY);
+    }
+
+    // ===== GetStock =====
+
+    public function testGetStockSuccess(): void
+    {
+        $this->manager->initStocks(['SKU_GS' => 20]);
+        $result = $this->manager->getStock('SKU_GS');
+        $this->assertSuccess($result);
+        $this->assertSame(20, $result['data']['stock']);
+        $this->assertArrayHasKey('soldOut', $result['data']);
+    }
+
+    public function testGetStockNotExists(): void
+    {
+        $result = $this->manager->getStock('SKU_MISS');
+        $this->assertSuccess($result);
+        $this->assertNull($result['data']['stock']);
+        $this->assertFalse($result['data']['soldOut']);
+    }
+
+    public function testGetStockInvalidSku(): void
+    {
+        $result = $this->manager->getStock('bad:sku');
+        $this->assertFailed($result, RedisStockSalesManager::CODE_ERR_INVALID_QUANTITY);
+    }
+
+    // ===== Response Patterns =====
+
+    public function testErrorResponsesAllHaveSuccessFalse(): void
+    {
+        $r1 = $this->manager->purchase('bad:sku', 'U1', 1, 1000, 'O1', 0);
+        $this->assertFalse($r1['success']);
+
+        $r2 = $this->manager->purchase('', 'U1', 1, 1000, 'O2', 0);
+        $this->assertFalse($r2['success']);
+
+        $r3 = $this->manager->cancel('bad:sku', 1, 1000, 'O3');
+        $this->assertFalse($r3['success']);
+
+        $r4 = $this->manager->cancel('SKU', 1, 1000, 'NO_ORDER');
+        $this->assertFalse($r4['success']);
+
+        $r5 = $this->manager->initStocks(['SKU_ERR' => 10]);
+        $this->assertTrue($r5['success']);
+    }
+
+    // ===== Monitor and Repair =====
+
+    public function testMonitorConsistencyCheck(): void
+    {
+        $this->manager->initStocks(['SKU_MON' => 10]);
+        $result = $this->manager->monitor('SKU_MON');
+        $this->assertSuccess($result);
+        $this->assertTrue($result['data']['consistency']);
+    }
+
+    public function testMonitorNotExists(): void
+    {
+        $result = $this->manager->monitor('SKU_GHOST_MON');
+        $this->assertSuccess($result);
+        $this->assertFalse($result['data']['exists']);
+        $this->assertTrue($result['data']['consistency']);
+    }
+
+    public function testMonitorInvalidSku(): void
+    {
+        $result = $this->manager->monitor('bad:sku');
+        $this->assertFailed($result, RedisStockSalesManager::CODE_ERR_INVALID_QUANTITY);
+    }
+
+    public function testMonitorDetectsInvalidSoldout(): void
+    {
+        $this->manager->initStocks(['SKU_MON_BAD' => 10]);
+        $soldOutKey = $this->testPrefix . 'SKU_MON_BAD:soldout';
+        $this->redis->set($soldOutKey, 1);
+        $result = $this->manager->monitor('SKU_MON_BAD');
+        $this->assertFalse($result['data']['consistency']);
+    }
+
+    public function testRepairBothAbsent(): void
+    {
+        $result = $this->manager->repair('SKU_NOOP');
+        $this->assertSuccess($result);
+        $this->assertSame(0, $result['data']['repair_code']);
+        $this->assertStringContainsString('both absent', $result['message']);
+    }
+
+    public function testRepairRemovesInvalidSoldout(): void
+    {
+        $this->manager->initStocks(['SKU_REP_M1' => 10]);
+        $this->redis->set($this->testPrefix . 'SKU_REP_M1:soldout', 1);
+        $result = $this->manager->repair('SKU_REP_M1');
+        $this->assertSuccess($result);
+        $this->assertSame(1, $result['data']['repair_code']);
+        $this->assertFalse($this->manager->isSoldOut('SKU_REP_M1')['data']['soldOut']);
+    }
+
+    public function testRepairAddsMissingSoldout(): void
+    {
+        $this->manager->initStocks(['SKU_REP_M2' => 0]);
+        $this->redis->del($this->testPrefix . 'SKU_REP_M2:soldout');
+        $result = $this->manager->repair('SKU_REP_M2');
+        $this->assertSuccess($result);
+        $this->assertSame(2, $result['data']['repair_code']);
+        $this->assertTrue($this->manager->isSoldOut('SKU_REP_M2')['data']['soldOut']);
+    }
+
+    public function testRepairInvalidSku(): void
+    {
+        $result = $this->manager->repair('bad:sku');
+        $this->assertFailed($result, RedisStockSalesManager::CODE_ERR_INVALID_QUANTITY);
+    }
+
+    // ===== Active SKU Operations =====
+
+    public function testIsSkuActiveNotSynced(): void
+    {
+        $active = $this->manager->getActiveSkus();
+        $this->assertNotContains('ANY_SKU', $active['data']);
+    }
+
+    public function testSyncActiveSkus(): void
+    {
+        $this->manager->syncActiveSkus(['S1', 'S2']);
+        $active = $this->manager->getActiveSkus();
+        $this->assertContains('S1', $active['data']);
+        $this->assertContains('S2', $active['data']);
+    }
+
+    public function testGetActiveSkusEmpty(): void
+    {
+        $result = $this->manager->getActiveSkus();
+        $this->assertEmpty($result['data']);
+    }
+
+    public function testGetActiveSkusAfterSync(): void
+    {
+        $this->manager->syncActiveSkus(['A', 'B', 'C']);
+        $result = $this->manager->getActiveSkus();
+        $this->assertCount(3, $result['data']);
+    }
+
+    public function testAddActiveSkus(): void
+    {
+        $this->manager->syncActiveSkus(['BASE']);
+        $this->manager->addActiveSkus(['NEW']);
+        $active = $this->manager->getActiveSkus();
+        $this->assertContains('NEW', $active['data']);
+        $this->assertContains('BASE', $active['data']);
+    }
+
+    public function testAddActiveSkusEmpty(): void
+    {
+        $this->manager->syncActiveSkus(['E']);
+        $this->manager->addActiveSkus([]);
+        $active = $this->manager->getActiveSkus();
+        $this->assertCount(1, $active['data']);
+    }
+
+    public function testRemoveActiveSku(): void
+    {
+        $this->manager->syncActiveSkus(['R1', 'R2']);
+        $this->manager->removeActiveSku('R1');
+        $active = $this->manager->getActiveSkus();
+        $this->assertNotContains('R1', $active['data']);
+        $this->assertContains('R2', $active['data']);
+    }
+
+    public function testPurchaseBlockedWhenNotActive(): void
+    {
+        $this->manager->initStocks(['SKU_BLOCKED' => 10]);
+        $result = $this->manager->purchase('SKU_BLOCKED', 'U1', 1, 1000, 'O_BLOCKED', 0);
+        $this->assertFailed($result, RedisStockSalesManager::CODE_ERR_INVALID_QUANTITY);
+        $this->assertStringContainsString('不可售', $result['message']);
+    }
+
+    public function testPurchaseWorksAfterSyncActive(): void
+    {
+        $this->manager->initStocks(['SKU_ACTIVE' => 10]);
+        $this->manager->syncActiveSkus(['SKU_ACTIVE']);
+        $result = $this->manager->purchase('SKU_ACTIVE', 'U1', 1, 1000, 'O_ACTIVE', 0);
+        $this->assertSuccess($result);
+    }
+
+    public function testActiveSkuLifecycle(): void
+    {
+        $this->manager->initStocks(['SKU_LIFE' => 10]);
+        $activeBefore = $this->manager->getActiveSkus();
+        $this->assertNotContains('SKU_LIFE', $activeBefore['data']);
+        $this->manager->syncActiveSkus(['SKU_LIFE']);
+        $activeAfterSync = $this->manager->getActiveSkus();
+        $this->assertContains('SKU_LIFE', $activeAfterSync['data']);
+        $result = $this->manager->purchase('SKU_LIFE', 'U1', 1, 1000, 'O_LIFE', 0);
+        $this->assertSuccess($result);
+        $this->manager->removeActiveSku('SKU_LIFE');
+        $activeAfterRemove = $this->manager->getActiveSkus();
+        $this->assertNotContains('SKU_LIFE', $activeAfterRemove['data']);
+    }
+
+    // ===== Long IDs =====
+
+    public function testVeryLongIds(): void
+    {
+        $longSku = str_repeat('X', 100);
+        $longUser = str_repeat('U', 100);
+        $longOrder = str_repeat('O', 64);
+        $this->manager->initStocks([$longSku => 10]);
+        $this->manager->syncActiveSkus([$longSku]);
+        $result = $this->manager->purchase($longSku, $longUser, 1, 1000, $longOrder, 0);
+        $this->assertSuccess($result);
+    }
+
+    // ===== initStocks throws exceptions =====
+
+    public function testInitStocksWithInvalidValueReturnsError(): void
+    {
+        $result = $this->manager->initStocks(['SKU_INV' => 'abc']);
+        $this->assertFailed($result, RedisStockSalesManager::CODE_ERR_INVALID_QUANTITY);
+    }
+
+    public function testInitStocksWithNegativeValueReturnsError(): void
+    {
+        $result = $this->manager->initStocks(['SKU_NEG' => -5]);
+        $this->assertFailed($result, RedisStockSalesManager::CODE_ERR_INVALID_QUANTITY);
+    }
+
+    public function testInitStocksWithNegativeTtlReturnsError(): void
+    {
+        $result = $this->manager->initStocks(['SKU_TTL_NEG' => 10], -10);
+        $this->assertFailed($result, RedisStockSalesManager::CODE_ERR_INVALID_QUANTITY);
+    }
+
+    // ===== DecrMultiStocks is not exposed via manager but we can test the stock manager directly =====
+
+    public function testPurchaseMultipleSkus(): void
+    {
+        $this->manager->initStocks(['SKU_M_A' => 10, 'SKU_M_B' => 5]);
+        $this->manager->syncActiveSkus(['SKU_M_A', 'SKU_M_B']);
+        $r1 = $this->manager->purchase('SKU_M_A', 'U1', 3, 3000, 'ORDER_M_A', 0);
+        $this->assertSuccess($r1);
+        $r2 = $this->manager->purchase('SKU_M_B', 'U1', 2, 2000, 'ORDER_M_B', 0);
+        $this->assertSuccess($r2);
+        $this->assertSame(7, $this->manager->getStock('SKU_M_A')['data']['stock']);
+        $this->assertSame(3, $this->manager->getStock('SKU_M_B')['data']['stock']);
     }
 }

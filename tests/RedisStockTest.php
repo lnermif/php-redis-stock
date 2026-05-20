@@ -4,9 +4,9 @@ namespace Nermif\Tests;
 
 use PHPUnit\Framework\TestCase;
 use Nermif\RedisStock;
+use Nermif\RedisConstants;
 use Redis;
 use Psr\Log\NullLogger;
-use Nermif\RedisConstants;
 
 class RedisStockTest extends TestCase
 {
@@ -46,305 +46,99 @@ class RedisStockTest extends TestCase
         $this->assertEquals($expected, (bool)$actual, "Key [{$key}] 存在状态不符合预期");
     }
 
-    // -------------------------------------------------------------------------
-    // 1. 初始化与获取测试
-    // -------------------------------------------------------------------------
+    public function testInitStocksEmptyArray(): void
+    {
+        $result = $this->stockManager->initStocks([]);
+        $this->assertSame(0, $result);
+    }
 
-    public function testInitStocksZeroQuantity()
+    public function testInitStocksZeroQuantity(): void
     {
         $this->stockManager->initStocks(['ZERO' => 0]);
         $res = $this->stockManager->getStock('ZERO');
-        $this->assertEquals(RedisStock::CODE_SUCCESS, $res['code']);
-        $this->assertEquals(0, $res['stock']);
+        $this->assertSame(RedisStock::CODE_SUCCESS, $res['code']);
+        $this->assertSame(0, $res['stock']);
         $this->assertTrue($res['soldOut']);
     }
 
-    public function testInitStocksWithTTL()
+    public function testInitStocksWithTTL(): void
     {
         $sku = 'TTL_SKU';
         $this->stockManager->initStocks([$sku => 10], 1);
-        $this->assertEquals(10, $this->stockManager->getStock($sku)['stock']);
+        $this->assertSame(10, $this->stockManager->getStock($sku)['stock']);
         sleep(2);
         $this->assertNull($this->stockManager->getStock($sku)['stock']);
     }
 
-    public function testGetStocksMix()
+    public function testInitStocksIdempotent(): void
     {
-        $this->stockManager->initStocks(['EXISTS' => 50]);
-        // 移除空字符串，替换为合法的不存在 SKU
-        $result = $this->stockManager->getStocks(['EXISTS', 'NOT_EXISTS', 'MISSING']);
-        $this->assertEquals(RedisStock::CODE_SUCCESS, $result['code']);
-        $this->assertEquals(50, $result['data']['EXISTS']);
-        $this->assertNull($result['data']['NOT_EXISTS']);
-        $this->assertNull($result['data']['MISSING']);
+        $sku = 'IDEM_INIT';
+        $this->stockManager->initStocks([$sku => 10]);
+        $this->stockManager->initStocks([$sku => 99]);
+        $res = $this->stockManager->getStock($sku);
+        $this->assertSame(10, $res['stock']);
     }
 
-    public function testGetStocksEmptyArray()
-    {
-        $result = $this->stockManager->getStocks([]);
-        $this->assertEquals(RedisStock::CODE_SUCCESS, $result['code']);
-        $this->assertEmpty($result['data']);
-    }
-
-    public function testInitStocksInvalidNumericType()
+    public function testInitStocksInvalidNumericType(): void
     {
         $this->expectException(\InvalidArgumentException::class);
         $this->expectExceptionMessage('must be a numeric value');
         $this->stockManager->initStocks(['INVALID' => 'abc']);
     }
 
-    public function testInitStocksNegativeValue()
+    public function testInitStocksNegativeValue(): void
     {
         $this->expectException(\InvalidArgumentException::class);
         $this->expectExceptionMessage('greater than or equal to 0');
         $this->stockManager->initStocks(['NEG' => -5]);
     }
 
-    // -------------------------------------------------------------------------
-    // 2. 边界拦截：不存在 SKU
-    // -------------------------------------------------------------------------
-
-    public function testDecrStockNotExists()
+    public function testInitStocksNegativeTtl(): void
     {
-        $res = $this->stockManager->decrStock('GHOST_SKU', 5);
-        $this->assertEquals(RedisStock::CODE_ERR_NOT_EXISTS, $res['code']);
-        $this->assertNull($res['remain']);
-    }
-
-    public function testIncrStockNotExists()
-    {
-        $res = $this->stockManager->incrStock('GHOST_SKU', 10);
-        $this->assertEquals(RedisStock::CODE_ERR_NOT_EXISTS, $res['code']);
-    }
-
-    // -------------------------------------------------------------------------
-    // 3. 正常增减库存测试
-    // -------------------------------------------------------------------------
-
-    public function testDecrStockInsufficient()
-    {
-        $sku = 'INSUF';
-        $this->stockManager->initStocks([$sku => 5]);
-        $res = $this->stockManager->decrStock($sku, 10);
-        $this->assertEquals(RedisStock::CODE_ERR_INSUFFICIENT, $res['code']);
-        $this->assertEquals(5, $res['remain']);
-    }
-
-    public function testDecrStockToZero()
-    {
-        $sku = 'TO_ZERO';
-        $this->stockManager->initStocks([$sku => 1]);
-        $this->stockManager->decrStock($sku, 1);
-        $this->assertTrue($this->stockManager->isSoldOut($sku)['soldOut']);
-    }
-
-    public function testIncrStockClearsSoldOut()
-    {
-        $sku = 'REFILL';
-        $this->stockManager->initStocks([$sku => 0]);
-        $this->assertTrue($this->stockManager->isSoldOut($sku)['soldOut']);
-
-        $this->stockManager->incrStock($sku, 10);
-        $this->assertFalse($this->stockManager->isSoldOut($sku)['soldOut']);
-    }
-
-    public function testInvalidQuantityOperations()
-    {
-        $sku = 'INVALID';
-        $this->stockManager->initStocks([$sku => 10]);
-        $this->assertEquals(RedisStock::CODE_ERR_INVALID_QUANTITY, $this->stockManager->decrStock($sku, 0)['code']);
-        $this->assertEquals(RedisStock::CODE_ERR_INVALID_QUANTITY, $this->stockManager->incrStock($sku, -1)['code']);
-    }
-
-    // -------------------------------------------------------------------------
-    // 4. 批量操作与原子性
-    // -------------------------------------------------------------------------
-
-    public function testDecrMultiStocksInvalidNumericType()
-    {
-        $this->stockManager->initStocks(['A' => 10]);
-        $res = $this->stockManager->decrMultiStocks(['A' => 'abc']);
-        $this->assertFalse($res['success']);
-        $this->assertEquals(RedisStock::CODE_ERR_INVALID_QUANTITY, $res['code']);
-    }
-
-    public function testDecrMultiStocksAtomicRollback()
-    {
-        $this->stockManager->initStocks(['A' => 10, 'B' => 3]);
-        $res = $this->stockManager->decrMultiStocks(['A' => 5, 'B' => 5]);
-
-        $this->assertFalse($res['success']);
-        $this->assertEquals('B', $res['sku']);
-        $this->assertEquals(10, $this->stockManager->getStock('A')['stock']);
-    }
-
-    public function testDecrMultiStocksWithNonExistent()
-    {
-        $this->stockManager->initStocks(['A' => 10]);
-        $res = $this->stockManager->decrMultiStocks(['A' => 1, 'GHOST' => 1]);
-        $this->assertFalse($res['success']);
-        $this->assertEquals(RedisStock::CODE_ERR_NOT_EXISTS, $res['code']);
-        $this->assertEquals(10, $this->stockManager->getStock('A')['stock']);
-    }
-
-    // -------------------------------------------------------------------------
-    // 5. 监控与自愈测试
-    // -------------------------------------------------------------------------
-
-    public function testMonitorDetectsInvalidSoldOutMarker()
-    {
-        $sku = 'M1';
-        $this->stockManager->initStocks([$sku => 10]);
-        $this->redis->set($this->testPrefix . $sku . ':soldout', 1);
-
-        $res = $this->stockManager->monitor($sku);
-        $this->assertFalse($res['consistency']);
-
-        $repair = $this->stockManager->repair($sku);
-        $this->assertEquals(1, $repair['repair_code']); // Action 1
-        $this->assertFalse($this->stockManager->isSoldOut($sku)['soldOut']);
-    }
-
-    public function testRepairAddsMissingSoldOutMarker()
-    {
-        $sku = 'M2';
-        $this->stockManager->initStocks([$sku => 0]);
-        $this->redis->del($this->testPrefix . $sku . ':soldout');
-
-        $res = $this->stockManager->repair($sku);
-        $this->assertEquals(2, $res['repair_code']);
-        $this->assertTrue($this->stockManager->isSoldOut($sku)['soldOut']);
-    }
-
-    public function testRepairCleansOrphanedMarker()
-    {
-        $sku = 'ORPHAN';
-        $this->redis->set($this->testPrefix . $sku . ':soldout', 1);
-
-        $res = $this->stockManager->repair($sku);
-        $this->assertEquals(4, $res['repair_code']);
-        $this->assertKeyExists($this->testPrefix . $sku . ':soldout', false);
-    }
-
-    public function testRepairIdempotency()
-    {
-        $sku = 'IDEM';
-        $this->stockManager->initStocks([$sku => 10]);
-        $this->stockManager->repair($sku);
-        $res = $this->stockManager->repair($sku);
-        $this->assertEquals(3, $res['repair_code']);
-    }
-
-    // -------------------------------------------------------------------------
-    // 6. 生命周期、特殊字符与并发模拟
-    // -------------------------------------------------------------------------
-
-    public function testDelStockLifecycle()
-    {
-        $sku = 'DEL';
-        $this->stockManager->initStocks([$sku => 10]);
-        $res = $this->stockManager->delStock($sku);
-
-        $this->assertEquals(RedisStock::CODE_SUCCESS, $res['code']);
-        $this->assertGreaterThanOrEqual(1, $res['deleted']);
-
-        $this->assertNull($this->stockManager->getStock($sku)['stock']);
-        $this->assertKeyExists($this->testPrefix . $sku . ':soldout', false);
-
-        $incrRes = $this->stockManager->incrStock($sku, 5);
-        $this->assertEquals(RedisStock::CODE_ERR_NOT_EXISTS, $incrRes['code']);
-    }
-
-    public function testMonitorReturnStructure()
-    {
-        $sku = 'MONITOR_STRUCT';
-        $this->stockManager->initStocks([$sku => 10]);
-        $res = $this->stockManager->monitor($sku);
-
-        $this->assertArrayHasKey('code', $res);
-        $this->assertArrayHasKey('exists', $res);
-        $this->assertArrayHasKey('stock', $res);
-        $this->assertArrayHasKey('ttl', $res);
-        $this->assertArrayHasKey('is_sold_out', $res);
-        $this->assertArrayHasKey('consistency', $res);
-
-        $this->assertEquals(RedisStock::CODE_SUCCESS, $res['code']);
-        $this->assertTrue($res['exists']);
-        $this->assertEquals(10, $res['stock']);
-        $this->assertTrue($res['consistency']);
-    }
-
-    /**
-     * 修改：非法 SKU 现在应被拦截并返回 CODE_ERR_INVALID_QUANTITY
-     */
-    public function testSpecialCharacters()
-    {
-        $sku = 'PROD:123#{HASH}';
-        // initStocks 会抛异常，因为 SKU 非法
         $this->expectException(\InvalidArgumentException::class);
-        $this->stockManager->initStocks([$sku => 100]);
+        $this->expectExceptionMessage('TTL must be >= 0');
+        $this->stockManager->initStocks(['NEG_TTL' => 10], -5);
     }
 
-    public function testConcurrentSimulation()
+    public function testInitStocksTtlCapped(): void
     {
-        $sku = 'CONCUR';
-        $this->stockManager->initStocks([$sku => 10]);
-
-        for ($i = 0; $i < 15; $i++) {
-            $res = $this->stockManager->decrStock($sku, 1);
-            if ($i < 10) {
-                $this->assertEquals(RedisStock::CODE_SUCCESS, $res['code']);
-            } else {
-                $this->assertEquals(RedisStock::CODE_ERR_INSUFFICIENT, $res['code']);
-            }
+        $sku = 'TTL_CAP';
+        $ttl = RedisConstants::MAX_TTL + 100;
+        $this->stockManager->initStocks([$sku => 10], $ttl);
+        $stockKey = $this->testPrefix . $sku;
+        $actualTtl = $this->redis->ttl($stockKey);
+        if ($actualTtl > 0) {
+            $this->assertLessThanOrEqual(RedisConstants::MAX_TTL, $actualTtl);
+        } else {
+            $this->assertSame(-1, $actualTtl);
         }
-        $this->assertEquals(0, $this->stockManager->getStock($sku)['stock']);
     }
 
-    // =========================================================================
-    // 以下为补充的边界测试方法
-    // =========================================================================
-
-    /**
-     * 测试：incrStock 正常补货成功（直接校验返回值）
-     */
-    public function testIncrStockSuccess()
+    public function testGetStocksMix(): void
     {
-        $sku = 'INCR_OK';
-        $this->stockManager->initStocks([$sku => 5]);
-        $res = $this->stockManager->incrStock($sku, 3);
-        $this->assertEquals(RedisStock::CODE_SUCCESS, $res['code']);
-        $this->assertEquals(8, $res['remain']);
-        $this->assertEquals(8, $this->stockManager->getStock($sku)['stock']);
+        $this->stockManager->initStocks(['EXISTS' => 50]);
+        $result = $this->stockManager->getStocks(['EXISTS', 'NOT_EXISTS', 'MISSING']);
+        $this->assertSame(RedisStock::CODE_SUCCESS, $result['code']);
+        $this->assertSame(50, $result['data']['EXISTS']);
+        $this->assertNull($result['data']['NOT_EXISTS']);
+        $this->assertNull($result['data']['MISSING']);
     }
 
-    /**
-     * 测试：incrStock 对不存在的 SKU 返回 remain 为 null
-     */
-    public function testIncrStockNotExistsRemain()
+    public function testGetStocksEmptyArray(): void
     {
-        $res = $this->stockManager->incrStock('GHOST_INCR', 5);
-        $this->assertEquals(RedisStock::CODE_ERR_NOT_EXISTS, $res['code']);
-        $this->assertNull($res['remain']);
+        $result = $this->stockManager->getStocks([]);
+        $this->assertSame(RedisStock::CODE_SUCCESS, $result['code']);
+        $this->assertEmpty($result['data']);
     }
 
-    /**
-     * 测试：decrStock 正常扣减成功（校验 remain 字段）
-     */
-    public function testDecrStockSuccess()
+    public function testGetStocksInvalidSkuReturnsError(): void
     {
-        $sku = 'DECR_OK';
-        $this->stockManager->initStocks([$sku => 10]);
-        $res = $this->stockManager->decrStock($sku, 3);
-        $this->assertEquals(RedisStock::CODE_SUCCESS, $res['code']);
-        $this->assertEquals(7, $res['remain']);
-        $this->assertEquals(7, $this->stockManager->getStock($sku)['stock']);
+        $result = $this->stockManager->getStocks(['VALID', 'sku:bad']);
+        $this->assertSame(RedisStock::CODE_ERR_INVALID_QUANTITY, $result['code']);
+        $this->assertEmpty($result['data']);
     }
 
-    /**
-     * 测试：getStock 返回值结构（包含 code, stock, soldOut）
-     */
-    public function testGetStockStructure()
+    public function testGetStockStructure(): void
     {
         $sku = 'STRUCT';
         $this->stockManager->initStocks([$sku => 5]);
@@ -352,137 +146,372 @@ class RedisStockTest extends TestCase
         $this->assertArrayHasKey('code', $res);
         $this->assertArrayHasKey('stock', $res);
         $this->assertArrayHasKey('soldOut', $res);
-        $this->assertEquals(RedisStock::CODE_SUCCESS, $res['code']);
-        $this->assertEquals(5, $res['stock']);
+        $this->assertSame(RedisStock::CODE_SUCCESS, $res['code']);
+        $this->assertSame(5, $res['stock']);
         $this->assertFalse($res['soldOut']);
     }
 
-    /**
-     * 测试：getStock 查询不存在的 SKU
-     */
-    public function testGetStockNotExists()
+    public function testGetStockNotExists(): void
     {
         $res = $this->stockManager->getStock('GHOST_GET');
-        $this->assertEquals(RedisStock::CODE_SUCCESS, $res['code']); // 查询成功但 stock 为 null
+        $this->assertSame(RedisStock::CODE_SUCCESS, $res['code']);
         $this->assertNull($res['stock']);
         $this->assertFalse($res['soldOut']);
     }
 
-    /**
-     * 测试：isSoldOut 查询不存在的 SKU
-     */
-    public function testIsSoldOutNotExists()
+    public function testGetStockInvalidSku(): void
     {
-        $res = $this->stockManager->isSoldOut('GHOST_SOLDOUT');
-        $this->assertEquals(RedisStock::CODE_SUCCESS, $res['code']);
+        $res = $this->stockManager->getStock('sku:bad');
+        $this->assertSame(RedisStock::CODE_ERR_INVALID_QUANTITY, $res['code']);
+        $this->assertNull($res['stock']);
         $this->assertFalse($res['soldOut']);
     }
 
-    /**
-     * 测试：decrMultiStocks 批量扣减成功场景
-     */
-    public function testDecrMultiStocksSuccess()
+    public function testIsSoldOutNotExists(): void
+    {
+        $res = $this->stockManager->isSoldOut('GHOST_SOLDOUT');
+        $this->assertSame(RedisStock::CODE_SUCCESS, $res['code']);
+        $this->assertFalse($res['soldOut']);
+    }
+
+    public function testIsSoldOutInvalidSku(): void
+    {
+        $res = $this->stockManager->isSoldOut('bad:sku');
+        $this->assertSame(RedisStock::CODE_ERR_INVALID_QUANTITY, $res['code']);
+        $this->assertFalse($res['soldOut']);
+    }
+
+    public function testIsSoldOutTrueWhenStockZero(): void
+    {
+        $sku = 'SOLD_OUT_Y';
+        $this->stockManager->initStocks([$sku => 0]);
+        $res = $this->stockManager->isSoldOut($sku);
+        $this->assertTrue($res['soldOut']);
+    }
+
+    public function testDecrStockNotExists(): void
+    {
+        $res = $this->stockManager->decrStock('GHOST_SKU', 5);
+        $this->assertSame(RedisStock::CODE_ERR_NOT_EXISTS, $res['code']);
+        $this->assertNull($res['remain']);
+    }
+
+    public function testDecrStockSuccess(): void
+    {
+        $sku = 'DECR_OK';
+        $this->stockManager->initStocks([$sku => 10]);
+        $res = $this->stockManager->decrStock($sku, 3);
+        $this->assertSame(RedisStock::CODE_SUCCESS, $res['code']);
+        $this->assertSame(7, $res['remain']);
+        $this->assertSame(7, $this->stockManager->getStock($sku)['stock']);
+    }
+
+    public function testDecrStockInsufficient(): void
+    {
+        $sku = 'INSUF';
+        $this->stockManager->initStocks([$sku => 5]);
+        $res = $this->stockManager->decrStock($sku, 10);
+        $this->assertSame(RedisStock::CODE_ERR_INSUFFICIENT, $res['code']);
+        $this->assertSame(5, $res['remain']);
+    }
+
+    public function testDecrStockToZero(): void
+    {
+        $sku = 'TO_ZERO';
+        $this->stockManager->initStocks([$sku => 1]);
+        $this->stockManager->decrStock($sku, 1);
+        $this->assertTrue($this->stockManager->isSoldOut($sku)['soldOut']);
+    }
+
+    public function testDecrStockInvalidQuantity(): void
+    {
+        $sku = 'INVALID';
+        $this->stockManager->initStocks([$sku => 10]);
+        $this->assertSame(RedisStock::CODE_ERR_INVALID_QUANTITY, $this->stockManager->decrStock($sku, 0)['code']);
+        $this->assertSame(RedisStock::CODE_ERR_INVALID_QUANTITY, $this->stockManager->decrStock($sku, -1)['code']);
+    }
+
+    public function testDecrStockInvalidSku(): void
+    {
+        $res = $this->stockManager->decrStock('bad:sku', 1);
+        $this->assertSame(RedisStock::CODE_ERR_INVALID_QUANTITY, $res['code']);
+        $this->assertNull($res['remain']);
+    }
+
+    public function testIncrStockNotExists(): void
+    {
+        $res = $this->stockManager->incrStock('GHOST_SKU', 10);
+        $this->assertSame(RedisStock::CODE_ERR_NOT_EXISTS, $res['code']);
+        $this->assertNull($res['remain']);
+    }
+
+    public function testIncrStockSuccess(): void
+    {
+        $sku = 'INCR_OK';
+        $this->stockManager->initStocks([$sku => 5]);
+        $res = $this->stockManager->incrStock($sku, 3);
+        $this->assertSame(RedisStock::CODE_SUCCESS, $res['code']);
+        $this->assertSame(8, $res['remain']);
+        $this->assertSame(8, $this->stockManager->getStock($sku)['stock']);
+    }
+
+    public function testIncrStockClearsSoldOut(): void
+    {
+        $sku = 'REFILL';
+        $this->stockManager->initStocks([$sku => 0]);
+        $this->assertTrue($this->stockManager->isSoldOut($sku)['soldOut']);
+        $this->stockManager->incrStock($sku, 10);
+        $this->assertFalse($this->stockManager->isSoldOut($sku)['soldOut']);
+    }
+
+    public function testIncrStockInvalidQuantity(): void
+    {
+        $sku = 'INCR_INV';
+        $this->stockManager->initStocks([$sku => 10]);
+        $res = $this->stockManager->incrStock($sku, -1);
+        $this->assertSame(RedisStock::CODE_ERR_INVALID_QUANTITY, $res['code']);
+        $this->assertNull($res['remain']);
+    }
+
+    public function testIncrStockInvalidSku(): void
+    {
+        $res = $this->stockManager->incrStock('bad:sku', 5);
+        $this->assertSame(RedisStock::CODE_ERR_INVALID_QUANTITY, $res['code']);
+        $this->assertNull($res['remain']);
+    }
+
+    public function testDecrMultiStocksSuccess(): void
     {
         $this->stockManager->initStocks(['MULTI_A' => 10, 'MULTI_B' => 20, 'MULTI_C' => 30]);
         $items = ['MULTI_A' => 2, 'MULTI_B' => 5, 'MULTI_C' => 8];
         $res = $this->stockManager->decrMultiStocks($items);
         $this->assertTrue($res['success']);
-        $this->assertEquals(RedisStock::CODE_SUCCESS, $res['code']);
+        $this->assertSame(RedisStock::CODE_SUCCESS, $res['code']);
         $this->assertCount(3, $res['remain']);
-        $this->assertEquals(8, $res['remain']['MULTI_A']);
-        $this->assertEquals(15, $res['remain']['MULTI_B']);
-        $this->assertEquals(22, $res['remain']['MULTI_C']);
+        $this->assertSame(8, $res['remain']['MULTI_A']);
+        $this->assertSame(15, $res['remain']['MULTI_B']);
+        $this->assertSame(22, $res['remain']['MULTI_C']);
     }
 
-    /**
-     * 测试：decrMultiStocks 空数组输入
-     */
-    public function testDecrMultiStocksEmptyArray()
+    public function testDecrMultiStocksAtomicRollback(): void
+    {
+        $this->stockManager->initStocks(['A' => 10, 'B' => 3]);
+        $res = $this->stockManager->decrMultiStocks(['A' => 5, 'B' => 5]);
+        $this->assertFalse($res['success']);
+        $this->assertSame('B', $res['sku']);
+        $this->assertSame(10, $this->stockManager->getStock('A')['stock']);
+    }
+
+    public function testDecrMultiStocksWithNonExistent(): void
+    {
+        $this->stockManager->initStocks(['A' => 10]);
+        $res = $this->stockManager->decrMultiStocks(['A' => 1, 'GHOST' => 1]);
+        $this->assertFalse($res['success']);
+        $this->assertSame(RedisStock::CODE_ERR_NOT_EXISTS, $res['code']);
+        $this->assertSame(10, $this->stockManager->getStock('A')['stock']);
+    }
+
+    public function testDecrMultiStocksEmptyArray(): void
     {
         $res = $this->stockManager->decrMultiStocks([]);
         $this->assertFalse($res['success']);
-        $this->assertEquals(RedisStock::CODE_ERR_INVALID_QUANTITY, $res['code']);
+        $this->assertSame(RedisStock::CODE_ERR_INVALID_QUANTITY, $res['code']);
     }
 
-    /**
-     * 测试：initStocks TTL 超过最大值被截断
-     */
-    public function testInitStocksTtlCapped()
+    public function testDecrMultiStocksInvalidNumericType(): void
     {
-        $sku = 'TTL_CAP';
-        $ttl = RedisConstants::MAX_TTL + 100;
-        $this->stockManager->initStocks([$sku => 10], $ttl);
-        // 验证 Key 的 TTL 不大于 MAX_TTL
-        $stockKey = $this->testPrefix . $sku;
-        $actualTtl = $this->redis->ttl($stockKey);
-        if ($actualTtl > 0) {
-            $this->assertLessThanOrEqual(RedisConstants::MAX_TTL, $actualTtl);
-        } else {
-            $this->assertEquals(-1, $actualTtl, 'TTL 可能被设为永不过期');
-        }
+        $this->stockManager->initStocks(['A' => 10]);
+        $res = $this->stockManager->decrMultiStocks(['A' => 'abc']);
+        $this->assertFalse($res['success']);
+        $this->assertSame(RedisStock::CODE_ERR_INVALID_QUANTITY, $res['code']);
     }
 
-    /**
-     * 测试：initStocks TTL 为负数抛异常
-     */
-    public function testInitStocksNegativeTtl()
+    public function testDecrMultiStocksWithInvalidSku(): void
     {
-        $this->expectException(\InvalidArgumentException::class);
-        $this->expectExceptionMessage('TTL must be >= 0');
-        $this->stockManager->initStocks(['NEG_TTL' => 10], -5);
+        $res = $this->stockManager->decrMultiStocks(['bad:sku' => 1]);
+        $this->assertFalse($res['success']);
+        $this->assertSame(RedisStock::CODE_ERR_INVALID_QUANTITY, $res['code']);
     }
 
-    /**
-     * 测试：repair 对不存在的 SKU（两者都不存在）返回 repair_code 0
-     */
-    public function testRepairBothAbsent()
+    public function testDecrMultiStocksWithZeroQuantity(): void
     {
-        $sku = 'BOTH_ABSENT';
-        $res = $this->stockManager->repair($sku);
-        $this->assertEquals(RedisStock::CODE_SUCCESS, $res['code']);
-        $this->assertTrue($res['success']);
-        $this->assertEquals(0, $res['repair_code']);
-        $this->assertEquals('consistent (both absent)', $res['action']);
+        $this->stockManager->initStocks(['A' => 10]);
+        $res = $this->stockManager->decrMultiStocks(['A' => 0]);
+        $this->assertFalse($res['success']);
+        $this->assertSame(RedisStock::CODE_ERR_INVALID_QUANTITY, $res['code']);
     }
 
-    /**
-     * 测试：monitor 对不存在的 SKU
-     */
-    public function testMonitorNotExists()
+    public function testMonitorReturnStructure(): void
+    {
+        $sku = 'MONITOR_STRUCT';
+        $this->stockManager->initStocks([$sku => 10]);
+        $res = $this->stockManager->monitor($sku);
+        $this->assertArrayHasKey('code', $res);
+        $this->assertArrayHasKey('exists', $res);
+        $this->assertArrayHasKey('stock', $res);
+        $this->assertArrayHasKey('ttl', $res);
+        $this->assertArrayHasKey('is_sold_out', $res);
+        $this->assertArrayHasKey('consistency', $res);
+        $this->assertSame(RedisStock::CODE_SUCCESS, $res['code']);
+        $this->assertTrue($res['exists']);
+        $this->assertSame(10, $res['stock']);
+        $this->assertTrue($res['consistency']);
+    }
+
+    public function testMonitorNotExists(): void
     {
         $res = $this->stockManager->monitor('GHOST_MONITOR');
-        $this->assertEquals(RedisStock::CODE_SUCCESS, $res['code']);
+        $this->assertSame(RedisStock::CODE_SUCCESS, $res['code']);
         $this->assertFalse($res['exists']);
-        $this->assertEquals(0, $res['stock']);
-        $this->assertEquals(-2, $res['ttl']);
+        $this->assertSame(0, $res['stock']);
+        $this->assertSame(-2, $res['ttl']);
         $this->assertFalse($res['is_sold_out']);
         $this->assertTrue($res['consistency']);
     }
 
-    // =========================================================================
-// 7. 活跃 SKU 管理测试
-// =========================================================================
+    public function testMonitorInvalidSku(): void
+    {
+        $res = $this->stockManager->monitor('bad:sku');
+        $this->assertSame(RedisStock::CODE_ERR_INVALID_QUANTITY, $res['code']);
+        $this->assertFalse($res['consistency']);
+    }
 
-    public function testIsSkuActiveReturnsFalseForUnknownSku(): void
+    public function testMonitorDetectsInvalidSoldOutMarker(): void
+    {
+        $sku = 'M1';
+        $this->stockManager->initStocks([$sku => 10]);
+        $this->redis->set($this->testPrefix . $sku . ':soldout', 1);
+        $res = $this->stockManager->monitor($sku);
+        $this->assertFalse($res['consistency']);
+    }
+
+    public function testMonitorDetectsMissingSoldOutMarker(): void
+    {
+        $sku = 'MISS_M';
+        $this->stockManager->initStocks([$sku => 0]);
+        $this->redis->del($this->testPrefix . $sku . ':soldout');
+        $res = $this->stockManager->monitor($sku);
+        $this->assertFalse($res['consistency']);
+    }
+
+    public function testRepairBothAbsent(): void
+    {
+        $sku = 'BOTH_ABSENT';
+        $res = $this->stockManager->repair($sku);
+        $this->assertSame(RedisStock::CODE_SUCCESS, $res['code']);
+        $this->assertTrue($res['success']);
+        $this->assertSame(0, $res['repair_code']);
+        $this->assertStringContainsString('both absent', $res['action']);
+    }
+
+    public function testRepairRemovesInvalidSoldoutMarker(): void
+    {
+        $sku = 'M1';
+        $this->stockManager->initStocks([$sku => 10]);
+        $this->redis->set($this->testPrefix . $sku . ':soldout', 1);
+        $repair = $this->stockManager->repair($sku);
+        $this->assertSame(1, $repair['repair_code']);
+        $this->assertFalse($this->stockManager->isSoldOut($sku)['soldOut']);
+    }
+
+    public function testRepairAddsMissingSoldOutMarker(): void
+    {
+        $sku = 'M2';
+        $this->stockManager->initStocks([$sku => 0]);
+        $this->redis->del($this->testPrefix . $sku . ':soldout');
+        $res = $this->stockManager->repair($sku);
+        $this->assertSame(2, $res['repair_code']);
+        $this->assertTrue($this->stockManager->isSoldOut($sku)['soldOut']);
+    }
+
+    public function testRepairIdempotency(): void
+    {
+        $sku = 'IDEM';
+        $this->stockManager->initStocks([$sku => 10]);
+        $this->stockManager->repair($sku);
+        $res = $this->stockManager->repair($sku);
+        $this->assertSame(3, $res['repair_code']);
+    }
+
+    public function testRepairCleansOrphanedMarker(): void
+    {
+        $sku = 'ORPHAN';
+        $this->redis->set($this->testPrefix . $sku . ':soldout', 1);
+        $res = $this->stockManager->repair($sku);
+        $this->assertSame(4, $res['repair_code']);
+        $this->assertKeyExists($this->testPrefix . $sku . ':soldout', false);
+    }
+
+    public function testRepairInvalidSku(): void
+    {
+        $res = $this->stockManager->repair('bad:sku');
+        $this->assertSame(RedisStock::CODE_ERR_INVALID_QUANTITY, $res['code']);
+        $this->assertFalse($res['success']);
+    }
+
+    public function testDelStockLifecycle(): void
+    {
+        $sku = 'DEL';
+        $this->stockManager->initStocks([$sku => 10]);
+        $res = $this->stockManager->delStock($sku);
+        $this->assertSame(RedisStock::CODE_SUCCESS, $res['code']);
+        $this->assertGreaterThanOrEqual(1, $res['deleted']);
+        $this->assertNull($this->stockManager->getStock($sku)['stock']);
+        $this->assertKeyExists($this->testPrefix . $sku . ':soldout', false);
+        $incrRes = $this->stockManager->incrStock($sku, 5);
+        $this->assertSame(RedisStock::CODE_ERR_NOT_EXISTS, $incrRes['code']);
+    }
+
+    public function testDelStockInvalidSku(): void
+    {
+        $res = $this->stockManager->delStock('bad:sku');
+        $this->assertSame(RedisStock::CODE_ERR_INVALID_QUANTITY, $res['code']);
+        $this->assertSame(0, $res['deleted']);
+    }
+
+    public function testDelStockAlreadyDeleted(): void
+    {
+        $sku = 'ALREADY_GONE';
+        $res = $this->stockManager->delStock($sku);
+        $this->assertSame(RedisStock::CODE_SUCCESS, $res['code']);
+        $this->assertSame(0, $res['deleted']);
+    }
+
+    public function testSpecialCharacters(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->stockManager->initStocks(['PROD:123#{HASH}' => 100]);
+    }
+
+    public function testConcurrentSimulation(): void
+    {
+        $sku = 'CONCUR';
+        $this->stockManager->initStocks([$sku => 10]);
+        for ($i = 0; $i < 15; $i++) {
+            $res = $this->stockManager->decrStock($sku, 1);
+            if ($i < 10) {
+                $this->assertSame(RedisStock::CODE_SUCCESS, $res['code']);
+            } else {
+                $this->assertSame(RedisStock::CODE_ERR_INSUFFICIENT, $res['code']);
+            }
+        }
+        $this->assertSame(0, $this->stockManager->getStock($sku)['stock']);
+    }
+
+    public function testIsSkuActiveReturnsFalseForUnknown(): void
     {
         $this->assertFalse($this->stockManager->isSkuActive('UNKNOWN_SKU'));
     }
 
     public function testSyncAndGetActiveSkus(): void
     {
-        // 初始状态为空
         $this->assertEmpty($this->stockManager->getActiveSkus());
-
-        // 同步一批 SKU
         $skus = ['SKU_A', 'SKU_B', 'SKU_C'];
         $this->stockManager->syncActiveSkus($skus);
         $active = $this->stockManager->getActiveSkus();
-        // 顺序不重要，只比较值
         sort($active);
         sort($skus);
         $this->assertEquals($skus, $active);
-
-        // 每个 SKU 都应被标记为活跃
         $this->assertTrue($this->stockManager->isSkuActive('SKU_A'));
         $this->assertTrue($this->stockManager->isSkuActive('SKU_B'));
         $this->assertTrue($this->stockManager->isSkuActive('SKU_C'));
@@ -492,7 +521,6 @@ class RedisStockTest extends TestCase
     {
         $this->stockManager->syncActiveSkus(['OLD_A', 'OLD_B']);
         $this->stockManager->syncActiveSkus(['NEW_X', 'NEW_Y']);
-
         $active = $this->stockManager->getActiveSkus();
         $this->assertContains('NEW_X', $active);
         $this->assertContains('NEW_Y', $active);
@@ -504,7 +532,6 @@ class RedisStockTest extends TestCase
     {
         $this->stockManager->syncActiveSkus(['TMP']);
         $this->assertNotEmpty($this->stockManager->getActiveSkus());
-
         $this->stockManager->syncActiveSkus([]);
         $this->assertEmpty($this->stockManager->getActiveSkus());
     }
@@ -512,21 +539,64 @@ class RedisStockTest extends TestCase
     public function testRemoveActiveSku(): void
     {
         $this->stockManager->syncActiveSkus(['R1', 'R2', 'R3']);
-
         $this->stockManager->removeActiveSku('R2');
         $this->assertTrue($this->stockManager->isSkuActive('R1'));
         $this->assertFalse($this->stockManager->isSkuActive('R2'));
         $this->assertTrue($this->stockManager->isSkuActive('R3'));
-
-        // 移除不存在的 SKU 应无副作用
         $this->stockManager->removeActiveSku('NOT_THERE');
         $this->assertTrue($this->stockManager->isSkuActive('R1'));
     }
 
     public function testRemoveActiveSkuOnEmptySetDoesNotFail(): void
     {
-        // 集合本身不存在时，remove 操作也不应抛错
         $this->stockManager->removeActiveSku('GHOST');
         $this->assertFalse($this->stockManager->isSkuActive('GHOST'));
+    }
+
+    public function testAddActiveSkusIncremental(): void
+    {
+        $this->stockManager->syncActiveSkus(['BASE_A', 'BASE_B']);
+        $this->stockManager->addActiveSkus(['NEW_C']);
+        $active = $this->stockManager->getActiveSkus();
+        $this->assertContains('BASE_A', $active);
+        $this->assertContains('BASE_B', $active);
+        $this->assertContains('NEW_C', $active);
+        $this->assertCount(3, $active);
+    }
+
+    public function testAddActiveSkusEmptyDoesNothing(): void
+    {
+        $this->stockManager->syncActiveSkus(['EXIST']);
+        $this->stockManager->addActiveSkus([]);
+        $active = $this->stockManager->getActiveSkus();
+        $this->assertCount(1, $active);
+    }
+
+    public function testAddActiveSkusMultipleNew(): void
+    {
+        $this->stockManager->addActiveSkus(['X', 'Y', 'Z']);
+        $active = $this->stockManager->getActiveSkus();
+        $this->assertContains('X', $active);
+        $this->assertContains('Y', $active);
+        $this->assertContains('Z', $active);
+    }
+
+    public function testInitStocksWithZeroTtlNeverExpires(): void
+    {
+        $sku = 'NO_TTL';
+        $this->stockManager->initStocks([$sku => 5], 0);
+        $stockKey = $this->testPrefix . $sku;
+        $this->assertSame(-1, $this->redis->ttl($stockKey));
+    }
+
+    public function testDecrToZeroSetsSoldoutWithInheritedTtl(): void
+    {
+        $sku = 'TTL_SOLD';
+        $this->stockManager->initStocks([$sku => 1], 300);
+        $this->stockManager->decrStock($sku, 1);
+        $soldOutKey = $this->testPrefix . $sku . ':soldout';
+        $ttl = $this->redis->ttl($soldOutKey);
+        $this->assertGreaterThan(0, $ttl);
+        $this->assertLessThanOrEqual(300, $ttl);
     }
 }
