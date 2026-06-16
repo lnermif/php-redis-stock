@@ -94,6 +94,8 @@ final class RedisConstants
     public const DEFAULT_ORDER_TTL = 86400;
     /** 最大过期时间（30天） */
     public const MAX_TTL = 2592000;
+    /** 排行榜 Key 默认过期时间（7天，可按需调整） */
+    public const DEFAULT_LEADERBOARD_TTL = 604800;   // 新增
 
     // -------------------------------------------------------------------------
     // Lua 脚本占位符
@@ -104,4 +106,6 @@ final class RedisConstants
     public const LUA_USER_RECORD_TTL = '{{USER_RECORD_TTL}}';
     /** 订单幂等标记过期时间占位符（在 Lua 脚本中被替换为实际值） */
     public const LUA_ORDER_TTL = '{{ORDER_TTL}}';
+    /** 排行榜 Key 过期时间占位符 */
+    public const LUA_LEADERBOARD_TTL = '{{LEADERBOARD_TTL}}';
 }

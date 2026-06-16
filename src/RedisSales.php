@@ -62,6 +62,10 @@ class RedisSales extends AbstractRedisManager implements StockSalesCodes
         redis.call('zincrby', leaderboard_count_key, quantity, sku)
         redis.call('zincrby', leaderboard_amount_key, amount, sku)
         
+        -- 为排行榜 Key 设置过期时间（每次更新都重置 TTL）
+        redis.call('expire', leaderboard_count_key, {{LEADERBOARD_TTL}})
+        redis.call('expire', leaderboard_amount_key, {{LEADERBOARD_TTL}})
+        
         -- 7. 写入订单防重标记
         redis.call('setex', order_key, {{ORDER_TTL}}, '1')
         
@@ -150,6 +154,10 @@ LUA,
         redis.call('zincrby', leaderboard_count_key, quantity, sku)
         redis.call('zincrby', leaderboard_amount_key, amount, sku)
         
+        -- 为排行榜 Key 设置过期时间（每次更新都重置 TTL）
+        redis.call('expire', leaderboard_count_key, {{LEADERBOARD_TTL}})
+        redis.call('expire', leaderboard_amount_key, {{LEADERBOARD_TTL}})
+        
         -- 9. 写入订单防重标记
         redis.call('setex', order_key, {{ORDER_TTL}}, '1')
         
@@ -166,10 +174,12 @@ LUA
         local sales_amount_key = KEYS[6]
         local leaderboard_count_key = KEYS[7]
         local leaderboard_amount_key = KEYS[8]
+        local user_bought_key = KEYS[9]
 
         local qty = tonumber(ARGV[1])
         local amount = tonumber(ARGV[6])
         local sku = ARGV[7]
+        local user_id = ARGV[8]
 
         local CODE_SUCCESS = tonumber(ARGV[2])
         local CODE_ERR_ORDER_CANCELED = tonumber(ARGV[3])
@@ -203,6 +213,9 @@ LUA
         redis.call('decrby', sales_amount_key, amount)
         redis.call('zincrby', leaderboard_count_key, -qty, sku)
         redis.call('zincrby', leaderboard_amount_key, -amount, sku)
+        
+        -- 回滚用户购买数量
+        redis.call('hincrby', user_bought_key, user_id, -qty)
 
         -- 移除订单幂等标记，写入取消标记（避免并发重试再次扣减）
         redis.call('del', order_key)
@@ -237,6 +250,7 @@ LUA
         return [
             RedisConstants::LUA_USER_RECORD_TTL => RedisConstants::DEFAULT_USER_RECORD_TTL,
             RedisConstants::LUA_ORDER_TTL => RedisConstants::DEFAULT_ORDER_TTL,
+            RedisConstants::LUA_LEADERBOARD_TTL => RedisConstants::DEFAULT_LEADERBOARD_TTL,
         ];
     }
 
@@ -466,17 +480,22 @@ LUA
      * @param int $quantity 取消数量（与下单扣减数量一致）
      * @param int $amount 取消金额（单位：分，与下单金额一致）
      * @param string $orderId 订单 ID（与下单一致）
+     * @param string $userId 用户 ID
      * @return array ['code'=>int,'message'=>string,'remain'=>int|null]
      */
     public function cancelOrderWithStock(
         string $sku,
         int    $quantity,
         int    $amount,
-        string $orderId
+        string $orderId,
+        string $userId
     ): array
     {
         if (!$this->isValidId($sku)) {
             return ['code' => self::CODE_ERR_INVALID_QUANTITY, 'message' => 'SKU包含非法字符', 'remain' => null];
+        }
+        if (!$this->isValidId($userId)) {
+            return ['code' => self::CODE_ERR_INVALID_QUANTITY, 'message' => '用户ID包含非法字符', 'remain' => null];
         }
         if ($quantity <= 0) {
             return ['code' => self::CODE_ERR_INVALID_QUANTITY, 'message' => '数量无效', 'remain' => null];
@@ -495,6 +514,7 @@ LUA
         $salesAmountKey = $tag . $sku . RedisConstants::SALES_AMOUNT_SUFFIX;
         $leaderCountKey = $tag . RedisConstants::LEADERBOARD_COUNT_SUFFIX;
         $leaderAmountKey = $tag . RedisConstants::LEADERBOARD_AMOUNT_SUFFIX;
+        $userBoughtKey = $tag . $sku . RedisConstants::USER_BOUGHT_HASH_SUFFIX;
 
         $keys = [
             $stockKey,
@@ -505,6 +525,7 @@ LUA
             $salesAmountKey,
             $leaderCountKey,
             $leaderAmountKey,
+            $userBoughtKey,
         ];
 
         $args = [
@@ -515,6 +536,7 @@ LUA
             (int)self::CODE_ERR_NOT_EXISTS,
             $amount,
             $sku,
+            $userId
         ];
 
         try {

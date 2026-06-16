@@ -713,10 +713,15 @@ LUA,
      */
     public function isSkuActive(string $sku): bool
     {
-        return (bool)$this->readWithRetry(function ($redis) use ($sku) {
-            $key = $this->keyPrefix . RedisConstants::ACTIVE_SKUS_KEY;
-            return $redis->sIsMember($key, $sku);
-        });
+        try {
+            return (bool)$this->readWithRetry(function ($redis) use ($sku) {
+                $key = $this->keyPrefix . RedisConstants::ACTIVE_SKUS_KEY;
+                return $redis->sIsMember($key, $sku);
+            });
+        } catch (\RuntimeException $e) {
+            $this->log(LogLevel::ERROR, 'isSkuActive failed', ['sku' => $sku]);
+            return false; // 保守策略：不可售，避免超卖
+        }
     }
 
     /**

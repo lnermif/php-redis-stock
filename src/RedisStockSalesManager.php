@@ -128,6 +128,9 @@ class RedisStockSalesManager implements StockSalesCodes
         if (!$this->isSkuActive($sku)) {
             return $this->response(self::CODE_ERR_INVALID_QUANTITY, '该商品当前不可售');
         }
+        if (!$this->isValidId($orderId)) {
+            return $this->response(self::CODE_ERR_INVALID_QUANTITY, '订单ID包含非法字符');
+        }
 
         $result = $this->salesManager->recordPurchaseWithStock(
             $sku, $userId, $quantity, $amount, $orderId, $limitPerUser
@@ -174,12 +177,21 @@ class RedisStockSalesManager implements StockSalesCodes
      *
      * 可能的错误码：CODE_SUCCESS / CODE_ERR_ORDER_CANCELED / CODE_ERR_ORDER_NOT_PROCESSED / CODE_ERR_NOT_EXISTS / CODE_ERR_INVALID_QUANTITY / CODE_ERR_INVALID_AMOUNT / CODE_ERR_REDIS_UNAVAILABLE
      */
-    public function cancel(string $sku, int $quantity, int $amount, string $orderId): array
+    public function cancel(string $sku, int $quantity, int $amount, string $orderId, string $userId): array
     {
         if (!$this->isValidId($sku)) {
             return $this->response(self::CODE_ERR_INVALID_QUANTITY, 'SKU 包含非法字符');
         }
-        $result = $this->salesManager->cancelOrderWithStock($sku, $quantity, $amount, $orderId);
+        if (!$this->isValidId($orderId)) {
+            return $this->response(self::CODE_ERR_INVALID_QUANTITY, '订单ID包含非法字符');
+        }
+        if ($quantity <= 0) {
+            return $this->response(self::CODE_ERR_INVALID_QUANTITY, '数量无效');
+        }
+        if ($amount < 0) {
+            return $this->response(self::CODE_ERR_INVALID_AMOUNT, '金额无效');
+        }
+        $result = $this->salesManager->cancelOrderWithStock($sku, $quantity, $amount, $orderId, $userId);
         $code = (int)($result['code'] ?? self::CODE_ERR_REDIS_UNAVAILABLE);
         $message = (string)($result['message'] ?? '');
 

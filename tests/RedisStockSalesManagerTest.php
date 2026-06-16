@@ -94,7 +94,7 @@ class RedisStockSalesManagerTest extends TestCase
         $this->assertEquals(8, $stock['data']['stock']);
 
         // 取消订单
-        $cancel = $this->manager->cancel($sku, 2, 1999, $orderId);
+        $cancel = $this->manager->cancel($sku, 2, 1999, $orderId, $userId);
         $this->assertTrue($cancel['success']);
         $this->assertEquals(StockSalesCodes::CODE_SUCCESS, $cancel['code']);
 
@@ -163,21 +163,22 @@ class RedisStockSalesManagerTest extends TestCase
     {
         $sku = 'SKU_CANCEL';
         $orderId = 'ORDER_CANCEL';
+        $userId = 'U1';
 
         $this->manager->initStocks([$sku => 5]);
         $this->manager->syncActiveSkus([$sku]);
-        $this->manager->purchase($sku, 'U1', 2, 200, $orderId);
-        $this->manager->cancel($sku, 2, 200, $orderId);
+        $this->manager->purchase($sku, $userId, 2, 200, $orderId);
+        $this->manager->cancel($sku, 2, 200, $orderId, $userId);
 
         // 再次取消
-        $cancelAgain = $this->manager->cancel($sku, 2, 200, $orderId);
+        $cancelAgain = $this->manager->cancel($sku, 2, 200, $orderId, $userId);
         $this->assertFalse($cancelAgain['success']);
         $this->assertEquals(StockSalesCodes::CODE_ERR_ORDER_CANCELED, $cancelAgain['code']);
     }
 
     public function testCancelNonExistentOrder(): void
     {
-        $result = $this->manager->cancel('SKU_ANY', 1, 100, 'ORDER_NOT_EXIST');
+        $result = $this->manager->cancel('SKU_ANY', 1, 100, 'ORDER_NOT_EXIST', 'U_ANY');
         $this->assertFalse($result['success']);
         $this->assertEquals(StockSalesCodes::CODE_ERR_ORDER_NOT_PROCESSED, $result['code']);
     }
@@ -302,17 +303,12 @@ class RedisStockSalesManagerTest extends TestCase
     public function testAllErrorResponsesHaveSuccessFalse(): void
     {
         $sku = 'ERR_TEST';
+        $userId = 'U1';
         $this->manager->initStocks([$sku => 2]);
         $this->manager->syncActiveSkus([$sku]);
 
-        $methods = [
-            'purchase' => ['ERR_TEST', 'U1', 5, 100, 'O1'],
-            'incrStock' => ['GHOST', 5],
-            'cancel' => ['ERR_TEST', 1, 100, 'O_NO'],
-        ];
-
         // purchase 库存不足，必然是 success=false
-        $purchaseRes = $this->manager->purchase($sku, 'U1', 5, 100, 'O_INS');
+        $purchaseRes = $this->manager->purchase($sku, $userId, 5, 100, 'O_INS');
         $this->assertFalse($purchaseRes['success']);
 
         // incrStock 未初始化
@@ -320,7 +316,7 @@ class RedisStockSalesManagerTest extends TestCase
         $this->assertFalse($addRes['success']);
 
         // cancel 未处理订单
-        $cancelRes = $this->manager->cancel($sku, 1, 100, 'ORDER_NOT_DONE');
+        $cancelRes = $this->manager->cancel($sku, 1, 100, 'ORDER_NOT_DONE', $userId);
         $this->assertFalse($cancelRes['success']);
     }
 
