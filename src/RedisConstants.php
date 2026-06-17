@@ -96,6 +96,8 @@ final class RedisConstants
     public const MAX_TTL = 2592000;
     /** 排行榜 Key 默认过期时间（7天，可按需调整） */
     public const DEFAULT_LEADERBOARD_TTL = 604800;   // 新增
+    /** 批量购买默认最大 SKU 种类数 */
+    public const DEFAULT_MAX_BATCH_SKU_COUNT = 10;
 
     // -------------------------------------------------------------------------
     // Lua 脚本占位符

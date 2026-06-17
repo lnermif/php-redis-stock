@@ -497,4 +497,67 @@ class RedisStockSalesManagerTest extends TestCase
         $this->assertTrue($result['success']);
         $this->assertEquals(6, $result['data']['remain']);
     }
+
+    public function testBatchPurchaseSuccessAndCancel(): void
+    {
+        $this->manager->initStocks(['BATCH_A' => 10, 'BATCH_B' => 5, 'BATCH_C' => 8]);
+        $this->manager->syncActiveSkus(['BATCH_A', 'BATCH_B', 'BATCH_C']);
+
+        $items = [
+            ['sku' => 'BATCH_A', 'quantity' => 2, 'amount' => 1999, 'limit' => 5],
+            ['sku' => 'BATCH_B', 'quantity' => 1, 'amount' => 500, 'limit' => 3],
+            ['sku' => 'BATCH_C', 'quantity' => 3, 'amount' => 2997, 'limit' => 10],
+        ];
+        $userId = 'UBATCH';
+        $orderId = 'ORDER_BATCH';
+
+        $result = $this->manager->batchPurchase($items, $userId, $orderId);
+        $this->assertTrue($result['success']);
+        $this->assertCount(3, $result['data']['results']);
+
+        // 库存校验
+        $this->assertEquals(8, $this->manager->getStock('BATCH_A')['data']['stock']);
+        $this->assertEquals(4, $this->manager->getStock('BATCH_B')['data']['stock']);
+        $this->assertEquals(5, $this->manager->getStock('BATCH_C')['data']['stock']);
+
+        // 批量取消
+        $cancelResult = $this->manager->batchCancel($items, $orderId, $userId);
+        $this->assertTrue($cancelResult['success']);
+
+        // 库存恢复
+        $this->assertEquals(10, $this->manager->getStock('BATCH_A')['data']['stock']);
+        $this->assertEquals(5, $this->manager->getStock('BATCH_B')['data']['stock']);
+        $this->assertEquals(8, $this->manager->getStock('BATCH_C')['data']['stock']);
+
+        // 幂等取消
+        $cancelAgain = $this->manager->batchCancel($items, $orderId, $userId);
+        $this->assertFalse($cancelAgain['success']);
+        $this->assertEquals(StockSalesCodes::CODE_ERR_ORDER_CANCELED, $cancelAgain['code']);
+    }
+
+    public function testBatchPurchaseInsufficientStock(): void
+    {
+        $this->manager->initStocks(['BATCH_LOW' => 2]);
+        $this->manager->syncActiveSkus(['BATCH_LOW']);
+
+        $items = [['sku' => 'BATCH_LOW', 'quantity' => 5, 'amount' => 500, 'limit' => 10]];
+        $result = $this->manager->batchPurchase($items, 'U1', 'ORDER_BL');
+        $this->assertFalse($result['success']);
+        $this->assertEquals(StockSalesCodes::CODE_ERR_INSUFFICIENT, $result['code']);
+        $this->assertEquals('BATCH_LOW', $result['data']['failed_sku']);
+    }
+
+    public function testBatchPurchaseExceedLimit(): void
+    {
+        $sku = 'BATCH_LIMIT';
+        $this->manager->initStocks([$sku => 10]);
+        $this->manager->syncActiveSkus([$sku]);
+
+        $this->manager->batchPurchase([['sku' => $sku, 'quantity' => 3, 'amount' => 300, 'limit' => 5]], 'U2', 'ORDER_BL1');
+
+        $result = $this->manager->batchPurchase([['sku' => $sku, 'quantity' => 3, 'amount' => 300, 'limit' => 5]], 'U2', 'ORDER_BL2');
+        $this->assertFalse($result['success']);
+        $this->assertEquals(StockSalesCodes::CODE_ERR_LIMIT_EXCEEDED, $result['code']);
+        $this->assertEquals($sku, $result['data']['failed_sku']);
+    }
 }

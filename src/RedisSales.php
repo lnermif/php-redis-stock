@@ -223,6 +223,178 @@ LUA
 
         return {CODE_SUCCESS, remain}
 LUA
+        ,
+        'batch_purchase_with_stock' => <<<'LUA'
+        local order_key = KEYS[1]
+        local cancel_key = KEYS[2]
+        local user_set_key = KEYS[3]
+        
+        local user_id = ARGV[1]
+        local sku_count = tonumber(ARGV[2])
+        local idx = 3
+        
+        local CODE_ALREADY_PROCESSED = tonumber(ARGV[3 + sku_count*4])
+        local CODE_LIMIT_EXCEEDED = tonumber(ARGV[3 + sku_count*4 + 1])
+        local CODE_SUCCESS = tonumber(ARGV[3 + sku_count*4 + 2])
+        local CODE_ERR_INSUFFICIENT = tonumber(ARGV[3 + sku_count*4 + 3])
+        local CODE_ERR_NOT_EXISTS = tonumber(ARGV[3 + sku_count*4 + 4])
+        local CODE_ERR_ORDER_CANCELED = tonumber(ARGV[3 + sku_count*4 + 5])
+        
+        -- 0. 取消拦截
+        if redis.call('exists', cancel_key) == 1 then
+            return {CODE_ERR_ORDER_CANCELED, 0, ''}
+        end
+        
+        -- 1. 幂等检查
+        if redis.call('exists', order_key) == 1 then
+            return {CODE_ALREADY_PROCESSED, 0, ''}
+        end
+        
+        -- 2. 校验阶段
+        local key_offset = 4
+        for i = 1, sku_count do
+            local sku = ARGV[idx]
+            local quantity = tonumber(ARGV[idx+1])
+            local amount = tonumber(ARGV[idx+2])
+            local limit_per_user = tonumber(ARGV[idx+3])
+            idx = idx + 4
+        
+            local stock_key = KEYS[key_offset]
+            local soldout_key = KEYS[key_offset+1]
+            local user_bought_key = KEYS[key_offset+2]
+            key_offset = key_offset + 7
+        
+            local stock = redis.call('get', stock_key)
+            if stock == false then
+                return {CODE_ERR_NOT_EXISTS, i, sku}
+            end
+            stock = tonumber(stock)
+            if stock < quantity then
+                return {CODE_ERR_INSUFFICIENT, i, sku, stock}
+            end
+        
+            if limit_per_user > 0 then
+                local bought = redis.call('hget', user_bought_key, user_id)
+                bought = bought and tonumber(bought) or 0
+                if bought + quantity > limit_per_user then
+                    local remaining = limit_per_user - bought
+                    return {CODE_LIMIT_EXCEEDED, i, sku, remaining}
+                end
+            end
+        end
+        
+        -- 3. 执行阶段
+        key_offset = 4
+        idx = 3
+        local results = {}
+        for i = 1, sku_count do
+            local sku = ARGV[idx]
+            local quantity = tonumber(ARGV[idx+1])
+            local amount = tonumber(ARGV[idx+2])
+            idx = idx + 4
+        
+            local stock_key = KEYS[key_offset]
+            local soldout_key = KEYS[key_offset+1]
+            local user_bought_key = KEYS[key_offset+2]
+            local sales_count_key = KEYS[key_offset+3]
+            local sales_amount_key = KEYS[key_offset+4]
+            local leaderboard_count_key = KEYS[key_offset+5]
+            local leaderboard_amount_key = KEYS[key_offset+6]
+            key_offset = key_offset + 7
+        
+            local remain = redis.call('decrby', stock_key, quantity)
+            if remain == 0 then
+                local stock_ttl = redis.call('ttl', stock_key)
+                if stock_ttl > 0 then
+                    redis.call('setex', soldout_key, stock_ttl, 1)
+                elseif stock_ttl == -1 then
+                    redis.call('set', soldout_key, 1)
+                end
+            end
+        
+            redis.call('hincrby', user_bought_key, user_id, quantity)
+            redis.call('expire', user_bought_key, {{USER_RECORD_TTL}})
+            redis.call('sadd', user_set_key, sku)
+        
+            redis.call('incrby', sales_count_key, quantity)
+            redis.call('incrby', sales_amount_key, amount)
+        
+            redis.call('zincrby', leaderboard_count_key, quantity, sku)
+            redis.call('zincrby', leaderboard_amount_key, amount, sku)
+            redis.call('expire', leaderboard_count_key, {{LEADERBOARD_TTL}})
+            redis.call('expire', leaderboard_amount_key, {{LEADERBOARD_TTL}})
+        
+            local total_sales = redis.call('get', sales_count_key)
+            results[i] = {CODE_SUCCESS, total_sales or 0, sku}
+        end
+        
+        redis.call('expire', user_set_key, {{USER_RECORD_TTL}})
+        redis.call('setex', order_key, {{ORDER_TTL}}, '1')
+        
+        return results
+LUA
+        ,
+        'batch_cancel_order_with_stock' => <<<'LUA'
+        local order_key = KEYS[1]
+        local cancel_key = KEYS[2]
+        
+        local sku_count = tonumber(ARGV[1])
+        local idx = 2
+        
+        local CODE_SUCCESS = tonumber(ARGV[2 + sku_count*3])
+        local CODE_ERR_ORDER_CANCELED = tonumber(ARGV[2 + sku_count*3 + 1])
+        local CODE_ERR_ORDER_NOT_PROCESSED = tonumber(ARGV[2 + sku_count*3 + 2])
+        local CODE_ERR_NOT_EXISTS = tonumber(ARGV[2 + sku_count*3 + 3])
+        local user_id = ARGV[2 + sku_count*3 + 4]
+        
+        -- 幂等：已取消
+        if redis.call('exists', cancel_key) == 1 then
+            return {CODE_ERR_ORDER_CANCELED, 0, ''}
+        end
+        
+        -- 订单未处理
+        if redis.call('exists', order_key) == 0 then
+            return {CODE_ERR_ORDER_NOT_PROCESSED, 0, ''}
+        end
+        
+        local key_offset = 3
+        for i = 1, sku_count do
+            local sku = ARGV[idx]
+            local qty = tonumber(ARGV[idx+1])
+            local amount = tonumber(ARGV[idx+2])
+            idx = idx + 3
+        
+            local stock_key = KEYS[key_offset]
+            local soldout_key = KEYS[key_offset+1]
+            local sales_count_key = KEYS[key_offset+2]
+            local sales_amount_key = KEYS[key_offset+3]
+            local leaderboard_count_key = KEYS[key_offset+4]
+            local leaderboard_amount_key = KEYS[key_offset+5]
+            local user_bought_key = KEYS[key_offset+6]
+            key_offset = key_offset + 7
+        
+            if redis.call('exists', stock_key) == 0 then
+                return {CODE_ERR_NOT_EXISTS, i, sku}
+            end
+        
+            local remain = redis.call('incrby', stock_key, qty)
+            if remain > 0 then
+                redis.call('del', soldout_key)
+            end
+        
+            redis.call('decrby', sales_count_key, qty)
+            redis.call('decrby', sales_amount_key, amount)
+            redis.call('zincrby', leaderboard_count_key, -qty, sku)
+            redis.call('zincrby', leaderboard_amount_key, -amount, sku)
+        
+            redis.call('hincrby', user_bought_key, user_id, -qty)
+        end
+        
+        redis.call('del', order_key)
+        redis.call('setex', cancel_key, {{ORDER_TTL}}, '1')
+        
+        return {CODE_SUCCESS, 0, ''}
+LUA
     ];
 
     public function __construct(
@@ -474,6 +646,109 @@ LUA
     }
 
     /**
+     * 批量购买（原子扣减库存 + 记录销售 + 限购 + 排行榜）
+     *
+     * @param array $items  [['sku' => '...', 'quantity' => int, 'amount' => int, 'limit' => int], ...]
+     * @param string $userId
+     * @param string $orderId
+     * @return array
+     */
+    public function batchRecordPurchaseWithStock(array $items, string $userId, string $orderId): array
+    {
+        if (!$this->isValidId($userId)) {
+            return ['code' => self::CODE_ERR_INVALID_QUANTITY, 'message' => '用户ID包含非法字符'];
+        }
+        if (empty($items)) {
+            return ['code' => self::CODE_ERR_INVALID_QUANTITY, 'message' => '商品列表为空'];
+        }
+
+        $tag = $this->keyPrefix;
+        $keys = [
+            $tag . 'order:' . $orderId,
+            $tag . 'order:' . $orderId . RedisConstants::ORDER_CANCELED_SUFFIX,
+            $tag . RedisConstants::USER_PURCHASED_SET_PREFIX . $userId . ':purchased'
+        ];
+
+        $args = [$userId, count($items)];
+        foreach ($items as $item) {
+            $sku = $item['sku'] ?? '';
+            $quantity = (int)($item['quantity'] ?? 0);
+            $amount = (int)($item['amount'] ?? 0);
+            $limit = (int)($item['limit'] ?? 0);
+
+            if (!$this->isValidId($sku) || $quantity <= 0 || $amount < 0) {
+                return ['code' => self::CODE_ERR_INVALID_QUANTITY, 'message' => "参数非法: SKU={$sku}"];
+            }
+
+            $keys[] = $tag . $sku;                                                  // stock
+            $keys[] = $tag . $sku . RedisConstants::SOLD_OUT_SUFFIX;                // soldout
+            $keys[] = $tag . $sku . RedisConstants::USER_BOUGHT_HASH_SUFFIX;        // user_bought
+            $keys[] = $tag . $sku . RedisConstants::SALES_COUNT_SUFFIX;             // sales_count
+            $keys[] = $tag . $sku . RedisConstants::SALES_AMOUNT_SUFFIX;            // sales_amount
+            $keys[] = $tag . RedisConstants::LEADERBOARD_COUNT_SUFFIX;              // leaderboard_count
+            $keys[] = $tag . RedisConstants::LEADERBOARD_AMOUNT_SUFFIX;             // leaderboard_amount
+
+            $args[] = $sku;
+            $args[] = $quantity;
+            $args[] = $amount;
+            $args[] = $limit;
+        }
+
+        $args[] = self::CODE_ERR_ALREADY_PROCESSED;
+        $args[] = self::CODE_ERR_LIMIT_EXCEEDED;
+        $args[] = self::CODE_SUCCESS;
+        $args[] = self::CODE_ERR_INSUFFICIENT;
+        $args[] = self::CODE_ERR_NOT_EXISTS;
+        $args[] = self::CODE_ERR_ORDER_CANCELED;
+
+        try {
+            $rawResult = $this->execLuaWithRetry('batch_purchase_with_stock', $keys, $args);
+            if (!is_array($rawResult)) {
+                throw new \RuntimeException('Lua result invalid');
+            }
+
+            // 成功：返回嵌套表
+            if (isset($rawResult[0]) && is_array($rawResult[0])) {
+                $results = [];
+                foreach ($rawResult as $res) {
+                    $code = (int)$res[0];
+                    $totalSales = (int)($res[1] ?? 0);
+                    $sku = $res[2] ?? '';
+                    $results[] = [
+                        'sku' => $sku,
+                        'code' => $code,
+                        'total_sales' => $totalSales,
+                    ];
+                }
+                return [
+                    'code' => self::CODE_SUCCESS,
+                    'message' => '批量购买成功',
+                    'results' => $results,
+                ];
+            }
+
+            // 失败返回
+            $code = (int)$rawResult[0];
+            $index = (int)($rawResult[1] ?? 0);
+            $failedSku = $rawResult[2] ?? '';
+            $extra = $rawResult[3] ?? 0;
+
+            return [
+                'code' => $code,
+                'message' => $this->getMessageByCode($code, (int)$extra),
+                'failed_sku' => $failedSku,
+                'failed_index' => $index,
+                'extra' => $extra,
+            ];
+        } catch (\Exception $e) {
+            return [
+                'code' => self::CODE_ERR_REDIS_UNAVAILABLE,
+                'message' => 'Redis集群写入异常: ' . $e->getMessage(),
+            ];
+        }
+    }
+
+    /**
      * 订单取消回滚：回滚库存 + 回滚销售数据（并发场景下会拦截重复回滚/重复扣减）
      *
      * @param string $sku 商品 SKU
@@ -554,6 +829,82 @@ LUA
                 'code' => self::CODE_ERR_REDIS_UNAVAILABLE,
                 'message' => 'Redis集群写入异常: ' . $e->getMessage(),
                 'remain' => null,
+            ];
+        }
+    }
+
+    /**
+     * 批量取消订单（回滚库存、销售数据、排行榜、用户购买计数）
+     *
+     * @param array $items  [['sku' => '...', 'quantity' => int, 'amount' => int], ...] 与购买时一致
+     * @param string $orderId
+     * @param string $userId
+     * @return array
+     */
+    public function batchCancelOrderWithStock(array $items, string $orderId, string $userId): array
+    {
+        if (!$this->isValidId($userId)) {
+            return ['code' => self::CODE_ERR_INVALID_QUANTITY, 'message' => '用户ID包含非法字符'];
+        }
+        if (empty($items)) {
+            return ['code' => self::CODE_ERR_INVALID_QUANTITY, 'message' => '商品列表为空'];
+        }
+
+        $tag = $this->keyPrefix;
+        $keys = [
+            $tag . 'order:' . $orderId,
+            $tag . 'order:' . $orderId . RedisConstants::ORDER_CANCELED_SUFFIX,
+        ];
+
+        $args = [count($items)];
+        foreach ($items as $item) {
+            $sku = $item['sku'] ?? '';
+            $quantity = (int)($item['quantity'] ?? 0);
+            $amount = (int)($item['amount'] ?? 0);
+
+            if (!$this->isValidId($sku)) {
+                return ['code' => self::CODE_ERR_INVALID_QUANTITY, 'message' => "SKU包含非法字符: {$sku}"];
+            }
+
+            $keys[] = $tag . $sku;                                                  // stock
+            $keys[] = $tag . $sku . RedisConstants::SOLD_OUT_SUFFIX;                // soldout
+            $keys[] = $tag . $sku . RedisConstants::SALES_COUNT_SUFFIX;             // sales_count
+            $keys[] = $tag . $sku . RedisConstants::SALES_AMOUNT_SUFFIX;            // sales_amount
+            $keys[] = $tag . RedisConstants::LEADERBOARD_COUNT_SUFFIX;              // leaderboard_count
+            $keys[] = $tag . RedisConstants::LEADERBOARD_AMOUNT_SUFFIX;             // leaderboard_amount
+            $keys[] = $tag . $sku . RedisConstants::USER_BOUGHT_HASH_SUFFIX;        // user_bought
+
+            $args[] = $sku;
+            $args[] = $quantity;
+            $args[] = $amount;
+        }
+
+        $args[] = self::CODE_SUCCESS;
+        $args[] = self::CODE_ERR_ORDER_CANCELED;
+        $args[] = self::CODE_ERR_ORDER_NOT_PROCESSED;
+        $args[] = self::CODE_ERR_NOT_EXISTS;
+        $args[] = $userId;
+
+        try {
+            $rawResult = $this->execLuaWithRetry('batch_cancel_order_with_stock', $keys, $args);
+            $code = (int)($rawResult[0] ?? 0);
+            $index = (int)($rawResult[1] ?? 0);
+            $failedSku = $rawResult[2] ?? '';
+
+            if ($code === self::CODE_SUCCESS) {
+                return ['code' => self::CODE_SUCCESS, 'message' => '批量取消成功'];
+            } else {
+                return [
+                    'code' => $code,
+                    'message' => $this->getMessageByCode($code, $index),
+                    'failed_sku' => $failedSku,
+                    'failed_index' => $index,
+                ];
+            }
+        } catch (\Exception $e) {
+            return [
+                'code' => self::CODE_ERR_REDIS_UNAVAILABLE,
+                'message' => 'Redis集群写入异常: ' . $e->getMessage(),
             ];
         }
     }

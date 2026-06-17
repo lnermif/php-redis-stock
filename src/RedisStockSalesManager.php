@@ -152,6 +152,68 @@ class RedisStockSalesManager implements StockSalesCodes
     }
 
     /**
+     * 批量购买（原子扣减库存 + 记录销售数据）
+     *
+     * @param array $items  [['sku' => '...', 'quantity' => 2, 'amount' => 1999, 'limit' => 3], ...]
+     * @param string $userId
+     * @param string $orderId
+     * @param int $maxSkus 最大允许 SKU 数，0 使用默认值
+     * @return array
+     */
+    public function batchPurchase(array $items, string $userId, string $orderId, int $maxSkus = 0): array
+    {
+        if ($orderId === '') {
+            return $this->response(self::CODE_ERR_INVALID_QUANTITY, '订单ID不能为空');
+        }
+        if (!$this->isValidId($userId)) {
+            return $this->response(self::CODE_ERR_INVALID_QUANTITY, '用户ID包含非法字符');
+        }
+        if (!$this->isValidId($orderId)) {
+            return $this->response(self::CODE_ERR_INVALID_QUANTITY, '订单ID包含非法字符');
+        }
+        if ($maxSkus <= 0) {
+            $maxSkus = RedisConstants::DEFAULT_MAX_BATCH_SKU_COUNT;
+        }
+        if (count($items) > $maxSkus) {
+            return $this->response(self::CODE_ERR_INVALID_QUANTITY, "一次最多购买 {$maxSkus} 种商品");
+        }
+        if (empty($items)) {
+            return $this->response(self::CODE_ERR_INVALID_QUANTITY, '商品列表为空');
+        }
+
+        foreach ($items as $item) {
+            $sku = $item['sku'] ?? '';
+            if (!$this->isValidId($sku)) {
+                return $this->response(self::CODE_ERR_INVALID_QUANTITY, "SKU 包含非法字符: {$sku}");
+            }
+            if (($item['quantity'] ?? 0) <= 0) {
+                return $this->response(self::CODE_ERR_INVALID_QUANTITY, "商品 {$sku} 数量无效");
+            }
+            if (($item['amount'] ?? 0) < 0) {
+                return $this->response(self::CODE_ERR_INVALID_AMOUNT, "商品 {$sku} 金额无效");
+            }
+            if (!$this->isSkuActive($sku)) {
+                return $this->response(self::CODE_ERR_INVALID_QUANTITY, "商品 {$sku} 当前不可售");
+            }
+        }
+
+        $result = $this->salesManager->batchRecordPurchaseWithStock($items, $userId, $orderId);
+        $code = $result['code'] ?? self::CODE_ERR_REDIS_UNAVAILABLE;
+
+        if ($code === self::CODE_SUCCESS) {
+            return $this->response($code, '批量购买成功', ['results' => $result['results']]);
+        } else {
+            $message = $result['message'] ?? '批量购买失败';
+            $data = [
+                'failed_sku' => $result['failed_sku'] ?? null,
+                'failed_index' => $result['failed_index'] ?? null,
+                'extra' => $result['extra'] ?? null,
+            ];
+            return $this->response($code, $message, $data);
+        }
+    }
+
+    /**
      * 取消订单（原子回滚库存 + 回退销售数据）
      *
      * ⚠️ 重要约束：
@@ -202,6 +264,54 @@ class RedisStockSalesManager implements StockSalesCodes
         ];
 
         return $this->response($code, $message, $data);
+    }
+
+    /**
+     * 批量取消订单（原子回滚库存 + 回退销售数据）
+     *
+     * @param array $items  与购买时完全一致 [['sku' => '...', 'quantity' => 2, 'amount' => 1999], ...]
+     * @param string $orderId
+     * @param string $userId
+     * @return array
+     */
+    public function batchCancel(array $items, string $orderId, string $userId): array
+    {
+        if ($orderId === '') {
+            return $this->response(self::CODE_ERR_INVALID_QUANTITY, '订单ID不能为空');
+        }
+        if (!$this->isValidId($orderId) || !$this->isValidId($userId)) {
+            return $this->response(self::CODE_ERR_INVALID_QUANTITY, '参数包含非法字符');
+        }
+        if (empty($items)) {
+            return $this->response(self::CODE_ERR_INVALID_QUANTITY, '商品列表为空');
+        }
+
+        foreach ($items as $item) {
+            $sku = $item['sku'] ?? '';
+            if (!$this->isValidId($sku)) {
+                return $this->response(self::CODE_ERR_INVALID_QUANTITY, "SKU 包含非法字符: {$sku}");
+            }
+            if (($item['quantity'] ?? 0) <= 0) {
+                return $this->response(self::CODE_ERR_INVALID_QUANTITY, "商品 {$sku} 数量无效");
+            }
+            if (($item['amount'] ?? 0) < 0) {
+                return $this->response(self::CODE_ERR_INVALID_AMOUNT, "商品 {$sku} 金额无效");
+            }
+        }
+
+        $result = $this->salesManager->batchCancelOrderWithStock($items, $orderId, $userId);
+        $code = $result['code'] ?? self::CODE_ERR_REDIS_UNAVAILABLE;
+
+        if ($code === self::CODE_SUCCESS) {
+            return $this->response($code, '批量取消成功');
+        } else {
+            $message = $result['message'] ?? '批量取消失败';
+            $data = [
+                'failed_sku' => $result['failed_sku'] ?? null,
+                'failed_index' => $result['failed_index'] ?? null,
+            ];
+            return $this->response($code, $message, $data);
+        }
     }
 
     // ---------- 辅助操作 ----------
