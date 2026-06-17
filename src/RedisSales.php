@@ -339,7 +339,6 @@ LUA
         local cancel_key = KEYS[2]
         
         local sku_count = tonumber(ARGV[1])
-        local idx = 2
         
         local CODE_SUCCESS = tonumber(ARGV[2 + sku_count*3])
         local CODE_ERR_ORDER_CANCELED = tonumber(ARGV[2 + sku_count*3 + 1])
@@ -357,7 +356,23 @@ LUA
             return {CODE_ERR_ORDER_NOT_PROCESSED, 0, ''}
         end
         
+        -- 第一阶段：预校验所有 SKU 库存是否存在（避免部分回滚）
         local key_offset = 3
+        local idx = 2
+        for i = 1, sku_count do
+            local stock_key = KEYS[key_offset]
+            key_offset = key_offset + 7
+            
+            if redis.call('exists', stock_key) == 0 then
+                return {CODE_ERR_NOT_EXISTS, i, ARGV[idx]}
+            end
+            
+            idx = idx + 3
+        end
+        
+        -- 第二阶段：执行回滚
+        key_offset = 3
+        idx = 2
         for i = 1, sku_count do
             local sku = ARGV[idx]
             local qty = tonumber(ARGV[idx+1])
@@ -372,10 +387,6 @@ LUA
             local leaderboard_amount_key = KEYS[key_offset+5]
             local user_bought_key = KEYS[key_offset+6]
             key_offset = key_offset + 7
-        
-            if redis.call('exists', stock_key) == 0 then
-                return {CODE_ERR_NOT_EXISTS, i, sku}
-            end
         
             local remain = redis.call('incrby', stock_key, qty)
             if remain > 0 then
@@ -864,6 +875,12 @@ LUA
 
             if (!$this->isValidId($sku)) {
                 return ['code' => self::CODE_ERR_INVALID_QUANTITY, 'message' => "SKU包含非法字符: {$sku}"];
+            }
+            if ($quantity <= 0) {
+                return ['code' => self::CODE_ERR_INVALID_QUANTITY, 'message' => "商品 {$sku} 数量无效"];
+            }
+            if ($amount < 0) {
+                return ['code' => self::CODE_ERR_INVALID_AMOUNT, 'message' => "商品 {$sku} 金额无效"];
             }
 
             $keys[] = $tag . $sku;                                                  // stock
